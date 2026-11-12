@@ -1,6 +1,8 @@
 import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from 'prom-client';
 
-import type { Sql } from './db.js';
+import { sql } from 'kysely';
+
+import type { Db } from './db.js';
 
 export const registry = new Registry();
 collectDefaultMetrics({ register: registry, prefix: 'crossorbit_' });
@@ -77,7 +79,7 @@ export const up = new Gauge({
   registers: [registry],
 });
 
-export function trackStorage(sql: Sql) {
+export function trackStorage(db: Db) {
   new Gauge({
     name: 'crossorbit_clippings_stored',
     help: 'Clippings held in the database',
@@ -85,8 +87,8 @@ export function trackStorage(sql: Sql) {
     registers: [registry],
     async collect() {
       for (const state of ['live', 'unanchored', 'deleted']) this.set({ state }, 0);
-      const rows = await sql<{ deleted: boolean; anchored: boolean; n: string }[]>`
-        SELECT deleted, annotation_id IS NOT NULL AS anchored, count(*) AS n FROM clippings GROUP BY 1, 2`;
+      const { rows } = await sql<{ deleted: boolean | number; anchored: boolean | number; n: string | number }>`
+        SELECT deleted, annotation_id IS NOT NULL AS anchored, count(*) AS n FROM clippings GROUP BY 1, 2`.execute(db);
       for (const row of rows) {
         this.set({ state: row.deleted ? 'deleted' : row.anchored ? 'live' : 'unanchored' }, Number(row.n));
       }
@@ -97,7 +99,7 @@ export function trackStorage(sql: Sql) {
     help: 'Document hashes resolved to BookOrbit books',
     registers: [registry],
     async collect() {
-      const [row] = await sql<{ n: string }[]>`SELECT count(*) AS n FROM documents`;
+      const row = await db.selectFrom('documents').select((eb) => eb.fn.countAll().as('n')).executeTakeFirstOrThrow();
       this.set(Number(row.n));
     },
   });

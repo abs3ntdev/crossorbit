@@ -1,8 +1,9 @@
 import { Hono, type Context } from 'hono';
+import { sql } from 'kysely';
 
 import { BookOrbit, BookOrbitError, type DeviceAuth } from './bookorbit.js';
 import { ClippingService } from './clippings.js';
-import type { Sql } from './db.js';
+import { type Db, now } from './db.js';
 import type { Logger } from './log.js';
 import { httpDuration, httpRequests, lastSync, progressSyncs } from './metrics.js';
 import { decodeBatch, parsePageQuery, ProtocolError } from './protocol.js';
@@ -42,9 +43,9 @@ function samePercentage(a: unknown, b: number) {
   return typeof a === 'number' && Math.abs(a - b) < 1e-6;
 }
 
-export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
+export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
   const app = new Hono();
-  const clippings = new ClippingService(sql, bookorbit, log);
+  const clippings = new ClippingService(db, bookorbit, log);
 
   app.use('*', async (c, next) => {
     if (c.req.path === '/healthz') return next();
@@ -63,7 +64,7 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
   });
 
   app.get('/healthz', async (c) => {
-    await sql`SELECT 1`;
+    await sql`SELECT 1`.execute(db);
     return c.json({ ok: true });
   });
 
@@ -92,11 +93,10 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
       const position = (raw as { position?: unknown }).position;
       const { document, progress, percentage } = body;
       if (isPosition(position) && typeof document === 'string' && typeof percentage === 'number') {
-        await sql`
-          INSERT INTO positions (username, document, progress, percentage, position)
-          VALUES (${auth.user}, ${document}, ${String(progress ?? '')}, ${percentage}, ${sql.json(position as never)})
-          ON CONFLICT (username, document) DO UPDATE SET progress = EXCLUDED.progress,
-            percentage = EXCLUDED.percentage, position = EXCLUDED.position, updated_at = now()`;
+        const row = { progress: String(progress ?? ''), percentage, position };
+        await db.insertInto('positions').values({ username: auth.user, document, ...row })
+          .onConflict((oc) => oc.columns(['username', 'document']).doUpdateSet({ ...row, updated_at: now(db) }))
+          .execute();
       }
     }
     return relay(c, res);
@@ -110,11 +110,11 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     const body = await res.clone().json().catch(() => null) as { percentage?: number; progress?: string; device?: string } | null;
     let restored = false;
     if (res.ok && body) {
-      const [saved] = await sql<{ progress: string; percentage: number; position: Record<string, unknown> }[]>`
-        SELECT progress, percentage, position FROM positions WHERE username = ${auth.user} AND document = ${document}`;
+      const saved = await db.selectFrom('positions').select(['progress', 'percentage', 'position'])
+        .where('username', '=', auth.user).where('document', '=', document).executeTakeFirst();
       if (saved && saved.progress === (body.progress ?? '') && samePercentage(body.percentage, saved.percentage)) {
         restored = true;
-        Object.assign(body, { position: saved.position });
+        Object.assign(body, { position: typeof saved.position === 'string' ? JSON.parse(saved.position) : saved.position });
       }
     }
     log.info('progress pulled', { document, status: res.status, percentage: body?.percentage ?? null, device: body?.device ?? null, position: restored });

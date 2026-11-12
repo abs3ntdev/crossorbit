@@ -9,13 +9,13 @@ Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Poi
 - `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device.
 - `GET /healthz` checks the database.
 
-Device credentials are forwarded per request and never stored. Postgres holds the document hash to book mapping, the clipping to annotation mapping with the device's layout fields, and tombstones. Book text is never persisted; parsed EPUBs are kept in a small in-memory cache.
+Device credentials are forwarded per request and never stored. The database (Postgres or SQLite) holds the document hash to book mapping, the clipping to annotation mapping with the device's layout fields, and tombstones. Book text is never persisted; parsed EPUBs are kept in a small in-memory cache.
 
 ## Configuration
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
-| `DATABASE_URL` | yes | | Postgres connection string. Migrations run at startup. |
+| `DATABASE_URL` | yes | | `postgres://...` / `postgresql://...` for Postgres, or `sqlite:<path>` (e.g. `sqlite:/data/crossorbit.db`) for SQLite. Migrations run at startup. |
 | `BOOKORBIT_URL` | yes | | BookOrbit base URL, e.g. `http://bookorbit:3000`. |
 | `BOOKORBIT_API_KEY` | yes | | BookOrbit API key (`bok_...`) with read and write access, owned by the same user as the device credentials. |
 | `PORT` | no | `8080` | HTTP port. |
@@ -37,7 +37,7 @@ Device credentials are forwarded per request and never stored. Postgres holds th
 5. Add variables `DATABASE_URL`, `BOOKORBIT_URL`, `BOOKORBIT_API_KEY`, and optionally `LOG_LEVEL`.
 6. Apply. The container reports healthy once `/healthz` responds.
 
-A dedicated database is recommended, e.g. `CREATE DATABASE crossorbit;` on the Postgres container BookOrbit already uses.
+For SQLite, mount a volume at `/data` and set `DATABASE_URL=sqlite:/data/crossorbit.db`. For Postgres, a dedicated database is recommended, e.g. `CREATE DATABASE crossorbit;` on the Postgres container BookOrbit already uses.
 
 ## Metrics
 
@@ -52,7 +52,7 @@ scrape_configs:
 
 | Metric | Meaning |
 |---|---|
-| `crossorbit_dependency_up{dependency}` | `postgres` or `bookorbit` answered the last scrape |
+| `crossorbit_dependency_up{dependency}` | `postgres` (the configured database, Postgres or SQLite) or `bookorbit` answered the last scrape |
 | `crossorbit_last_sync_timestamp_seconds{kind}` | Last successful `progress` or `clippings` sync |
 | `crossorbit_progress_syncs_total{direction,status}` | Progress pushes and pulls |
 | `crossorbit_clippings_total{direction,kind}` | Clippings created, updated, deleted or skipped, to the device or to BookOrbit |
@@ -71,6 +71,7 @@ A Grafana dashboard is in `grafana/crossorbit.json`.
 npm ci
 npm run typecheck
 TEST_DATABASE_URL=postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test npm test
+TEST_DATABASE_URL=sqlite: npm test
 ```
 
-The integration test drops and recreates the `public` schema of the test database.
+The Postgres run drops and recreates the `public` schema of the test database and creates a scratch `crossorbit_upgrade_test` database to check upgrades from the legacy SQL migration runner. With `sqlite:` the suite uses a temporary file.

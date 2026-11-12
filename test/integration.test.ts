@@ -1,16 +1,22 @@
+import { mkdtempSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createApp } from '../src/app.js';
 import { BookOrbit } from '../src/bookorbit.js';
-import { connect, migrate, type Sql } from '../src/db.js';
+import { sql } from 'kysely';
+
+import { connect, type Db, migrate } from '../src/db.js';
 import { createLogger } from '../src/log.js';
 import { registry, trackStorage } from '../src/metrics.js';
 import { fixtureEpub } from './fixture.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test';
+const SQLITE = DATABASE_URL.startsWith('sqlite:');
 const HASH = '0123456789abcdef0123456789abcdef';
 const AUTH = { 'x-auth-user': 'reader', 'x-auth-key': '5f4dcc3b5aa765d61d8327deb882cf99' };
 const API_KEY = 'bok_test';
@@ -82,7 +88,7 @@ class FakeBookOrbit {
   }
 }
 
-let sql: Sql;
+let db: Db;
 const fake = new FakeBookOrbit();
 let app: ReturnType<typeof createApp>;
 
@@ -119,17 +125,19 @@ async function pullAll() {
 }
 
 beforeAll(async () => {
-  sql = connect(DATABASE_URL);
-  await sql`DROP SCHEMA public CASCADE`;
-  await sql`CREATE SCHEMA public`;
-  await migrate(sql);
-  await migrate(sql);
+  db = connect(SQLITE ? `sqlite:${join(mkdtempSync(join(tmpdir(), 'crossorbit-')), 'test.db')}` : DATABASE_URL);
+  if (!SQLITE) {
+    await sql`DROP SCHEMA public CASCADE`.execute(db);
+    await sql`CREATE SCHEMA public`.execute(db);
+  }
+  await migrate(db);
+  await migrate(db);
   await fake.start();
-  app = createApp(sql, new BookOrbit(fake.url, API_KEY), createLogger('error'));
+  app = createApp(db, new BookOrbit(fake.url, API_KEY), createLogger('error'));
 });
 
 afterAll(async () => {
-  await sql?.end();
+  await db?.destroy();
   fake.server?.close();
 });
 
@@ -226,7 +234,7 @@ describe('firmware clipping sequence', () => {
 
 describe('metrics', () => {
   it('records the sync traffic above', async () => {
-    trackStorage(sql);
+    trackStorage(db);
     const text = await registry.metrics();
     expect(text).toMatch(/crossorbit_http_requests_total\{method="GET",route="\/api\/v1\/clippings\/:document",status="200"\} \d+/);
     expect(text).toMatch(/crossorbit_clippings_total\{direction="to_bookorbit",kind="created"\} [1-9]/);

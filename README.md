@@ -19,6 +19,7 @@ Device credentials are forwarded per request and never stored. Postgres holds th
 | `BOOKORBIT_URL` | yes | | BookOrbit base URL, e.g. `http://bookorbit:3000`. |
 | `BOOKORBIT_API_KEY` | yes | | BookOrbit API key (`bok_...`) with read and write access, owned by the same user as the device credentials. |
 | `PORT` | no | `8080` | HTTP port. |
+| `METRICS_PORT` | no | `9090` | Prometheus metrics port, serving `/metrics`. `0` disables it. Keep it off the public proxy. |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` or `error`. Logs are JSON lines. |
 
 ## Device setup
@@ -37,6 +38,32 @@ Device credentials are forwarded per request and never stored. Postgres holds th
 6. Apply. The container reports healthy once `/healthz` responds.
 
 A dedicated database is recommended, e.g. `CREATE DATABASE crossorbit;` on the Postgres container BookOrbit already uses.
+
+## Metrics
+
+`http://<container>:9090/metrics` serves Prometheus metrics. Each scrape also checks Postgres and the BookOrbit API key.
+
+```yaml
+scrape_configs:
+  - job_name: crossorbit
+    static_configs:
+      - targets: ['crossorbit:9090']
+```
+
+| Metric | Meaning |
+|---|---|
+| `crossorbit_dependency_up{dependency}` | `postgres` or `bookorbit` answered the last scrape |
+| `crossorbit_last_sync_timestamp_seconds{kind}` | Last successful `progress` or `clippings` sync |
+| `crossorbit_progress_syncs_total{direction,status}` | Progress pushes and pulls |
+| `crossorbit_clippings_total{direction,kind}` | Clippings created, updated, deleted or skipped, to the device or to BookOrbit |
+| `crossorbit_clippings_unanchored_total{direction}` | Highlights that could not be placed in the EPUB |
+| `crossorbit_clippings_stored{state}` | Stored clippings: `live`, `deleted`, `unanchored` |
+| `crossorbit_documents` | Device documents mapped to BookOrbit books |
+| `crossorbit_epub_loads_total{outcome}` | EPUB downloads from BookOrbit |
+| `crossorbit_http_requests_total`, `crossorbit_http_request_duration_seconds` | Device requests by route |
+| `crossorbit_bookorbit_requests_total`, `crossorbit_bookorbit_request_duration_seconds` | BookOrbit requests by operation |
+
+A Grafana dashboard is in `grafana/crossorbit.json`.
 
 ## Development
 

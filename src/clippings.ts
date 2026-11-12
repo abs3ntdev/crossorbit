@@ -5,6 +5,7 @@ import type { Sql } from './db.js';
 import { EpubBook, Lru } from './epub/book.js';
 import { cfiToClipping, clippingToCfi } from './epub/mapping.js';
 import type { Logger } from './log.js';
+import { clippingsTransferred, clippingsUnanchored, epubLoads } from './metrics.js';
 import { CHAPTER_MAX, type ClippingRow, encodeItem, type IncomingItem, type LiveItem, SYNC_VERSION, TEXT_MAX_BYTES, truncateUtf8 } from './protocol.js';
 
 const MIRROR_BATCH = 50;
@@ -72,6 +73,7 @@ export class ClippingService {
       SELECT annotation_id, deleted FROM clippings WHERE book_file_id = ${file.bookFileId} AND clipping_id = ${id}`;
     if (existing?.deleted) return;
     if (existing?.annotation_id != null) await this.bookorbit.deleteAnnotation(file.bookId, existing.annotation_id);
+    clippingsTransferred.inc({ direction: 'to_bookorbit', kind: 'deleted' });
     await this.sql`
       INSERT INTO clippings (book_file_id, clipping_id, book_id, deleted) VALUES (${file.bookFileId}, ${id}, ${file.bookId}, true)
       ON CONFLICT (book_file_id, clipping_id) DO UPDATE SET
@@ -87,6 +89,7 @@ export class ClippingService {
     if (!existing || moved || annotationId == null) {
       if (annotationId != null) await this.bookorbit.deleteAnnotation(file.bookId, annotationId);
       annotationId = await this.createAnnotation(file, item);
+      if (annotationId != null) clippingsTransferred.inc({ direction: 'to_bookorbit', kind: existing ? 'updated' : 'created' });
     }
     const createdAt = item.created_at || Number(existing?.created_at ?? 0) || nowSeconds();
     const fields = {
@@ -127,6 +130,7 @@ export class ClippingService {
       ? clippingToCfi(book, { spine: item.spine, text: item.text, startOffset: item.start_offset, endOffset: item.end_offset })
       : null;
     if (!cfi) {
+      clippingsUnanchored.inc({ direction: 'to_bookorbit' });
       this.log.warn('clipping not anchored', { bookFileId: file.bookFileId, clippingId: item.id });
       return null;
     }
@@ -149,6 +153,7 @@ export class ClippingService {
 
     const orphaned = mapped.filter((m) => !m.deleted && !present.has(m.annotation_id)).slice(0, MIRROR_BATCH);
     if (orphaned.length) {
+      clippingsTransferred.inc({ direction: 'to_device', kind: 'deleted' }, orphaned.length);
       await this.sql`
         UPDATE clippings SET deleted = true, text = '', chapter = '', revision = nextval('clipping_revision')
         WHERE book_file_id = ${file.bookFileId} AND clipping_id IN ${this.sql(orphaned.map((o) => o.clipping_id))}`;
@@ -162,6 +167,8 @@ export class ClippingService {
       const createdAt = Math.floor(new Date(annotation.highlightedAt ?? annotation.createdAt).getTime() / 1000) || nowSeconds();
       const live = clipping && Buffer.byteLength(clipping.text) <= TEXT_MAX_BYTES;
       const id = live ? clippingIdFor(createdAt, clipping.text) : `bookorbit-${annotation.id}`;
+      clippingsTransferred.inc({ direction: 'to_device', kind: live ? 'created' : 'skipped' });
+      if (!live) clippingsUnanchored.inc({ direction: 'to_device' });
       // Unanchorable annotations are recorded as tombstones so later pulls do not retry them.
       const inserted = await this.sql`
         INSERT INTO clippings ${this.sql({
@@ -192,8 +199,12 @@ export class ClippingService {
     if (!entry) {
       entry = this.bookorbit
         .downloadFile(fileId)
-        .then((bytes) => new EpubBook(bytes))
+        .then((bytes) => {
+          epubLoads.inc({ outcome: 'ok' });
+          return new EpubBook(bytes);
+        })
         .catch((error: unknown) => {
+          epubLoads.inc({ outcome: 'error' });
           this.log.warn('epub load failed', { fileId, error: error instanceof Error ? error.message : String(error) });
           this.books.delete(fileId);
           return null;

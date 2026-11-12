@@ -1,3 +1,5 @@
+import { operationOf, upstreamDuration, upstreamRequests } from './metrics.js';
+
 export interface DeviceAuth {
   user: string;
   key: string;
@@ -24,6 +26,21 @@ export class BookOrbitError extends Error {
 
 const DEVICE_ID = 'crossorbit';
 
+async function timedFetch(url: string, init: RequestInit): Promise<Response> {
+  const operation = operationOf(new URL(url).pathname);
+  const end = upstreamDuration.startTimer({ operation });
+  try {
+    const res = await fetch(url, init);
+    upstreamRequests.inc({ operation, status: String(res.status) });
+    return res;
+  } catch (error) {
+    upstreamRequests.inc({ operation, status: 'error' });
+    throw error;
+  } finally {
+    end();
+  }
+}
+
 export class BookOrbit {
   constructor(
     readonly baseUrl: string,
@@ -35,7 +52,7 @@ export class BookOrbit {
     headers.set('x-auth-user', auth.user);
     headers.set('x-auth-key', auth.key);
     headers.set('accept', 'application/json');
-    return fetch(`${this.baseUrl}/api/v1/koreader${path}`, { ...init, headers });
+    return timedFetch(`${this.baseUrl}/api/v1/koreader${path}`, { ...init, headers });
   }
 
   async resolve(document: string, auth: DeviceAuth): Promise<{ bookId: number; bookFileId: number } | null> {
@@ -51,11 +68,20 @@ export class BookOrbit {
     return match ? { bookId: match.bookId, bookFileId: match.bookFileId } : null;
   }
 
+  async ping(): Promise<boolean> {
+    try {
+      const res = await timedFetch(`${this.baseUrl}/api/v1/auth/me`, { headers: { 'x-api-key': this.apiKey } });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   private async api(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set('x-api-key', this.apiKey);
     if (init.body) headers.set('content-type', 'application/json');
-    const res = await fetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers });
+    const res = await timedFetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers });
     if (!res.ok && res.status !== 404) throw new BookOrbitError(res.status, `${init.method ?? 'GET'} ${path} failed with ${res.status}`);
     return res;
   }

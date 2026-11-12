@@ -7,6 +7,7 @@ import { createApp } from '../src/app.js';
 import { BookOrbit } from '../src/bookorbit.js';
 import { connect, migrate, type Sql } from '../src/db.js';
 import { createLogger } from '../src/log.js';
+import { registry, trackStorage } from '../src/metrics.js';
 import { fixtureEpub } from './fixture.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test';
@@ -206,5 +207,18 @@ describe('firmware clipping sequence', () => {
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });
+  });
+});
+
+describe('metrics', () => {
+  it('records the sync traffic above', async () => {
+    trackStorage(sql);
+    const text = await registry.metrics();
+    expect(text).toMatch(/crossorbit_http_requests_total\{method="GET",route="\/api\/v1\/clippings\/:document",status="200"\} \d+/);
+    expect(text).toMatch(/crossorbit_clippings_total\{direction="to_bookorbit",kind="created"\} [1-9]/);
+    expect(text).toMatch(/crossorbit_clippings_total\{direction="to_device",kind="deleted"\} [1-9]/);
+    expect(text).toMatch(/crossorbit_bookorbit_requests_total\{operation="match_check",status="201"\} [1-9]/);
+    expect(text).toMatch(/crossorbit_clippings_stored\{state="live"\} [1-9]/);
+    expect(text).not.toMatch(/route="[^"]*[0-9a-f]{32}/);
   });
 });

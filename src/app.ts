@@ -4,6 +4,7 @@ import { BookOrbit, BookOrbitError, type DeviceAuth } from './bookorbit.js';
 import { ClippingService } from './clippings.js';
 import type { Sql } from './db.js';
 import type { Logger } from './log.js';
+import { httpDuration, httpRequests, lastSync, progressSyncs } from './metrics.js';
 import { decodeBatch, parsePageQuery, ProtocolError } from './protocol.js';
 
 const DOCUMENT_RE = /^[A-Za-z0-9._-]{1,64}$/;
@@ -37,6 +38,15 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
   const app = new Hono();
   const clippings = new ClippingService(sql, bookorbit, log);
 
+  app.use('*', async (c, next) => {
+    if (c.req.path === '/healthz') return next();
+    const started = performance.now();
+    await next();
+    const route = c.req.routePath === '/*' ? 'unmatched' : c.req.routePath;
+    httpRequests.inc({ method: c.req.method, route, status: String(c.res.status) });
+    httpDuration.observe({ method: c.req.method, route }, (performance.now() - started) / 1000);
+  });
+
   app.onError((error, c) => {
     if (error instanceof ProtocolError) return c.json({ code: 2003, message: error.message }, 400);
     if (error instanceof BookOrbitError && error.status === 401) return unauthorized(c);
@@ -67,6 +77,8 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
       body: JSON.stringify(body),
     });
     log.info('progress pushed', { document: body.document, percentage: body.percentage, status: res.status });
+    progressSyncs.inc({ direction: 'push', status: String(res.status) });
+    if (res.ok) lastSync.setToCurrentTime({ kind: 'progress' });
     return relay(c, res);
   });
 
@@ -77,6 +89,8 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     const res = await bookorbit.device(`/syncs/progress/${encodeURIComponent(document)}`, auth);
     const body = await res.clone().json().catch(() => null) as { percentage?: number; device?: string } | null;
     log.info('progress pulled', { document, status: res.status, percentage: body?.percentage ?? null, device: body?.device ?? null });
+    progressSyncs.inc({ direction: 'pull', status: String(res.status) });
+    if (res.ok) lastSync.setToCurrentTime({ kind: 'progress' });
     return relay(c, res);
   });
 
@@ -96,6 +110,7 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
       more: page.more,
       items: page.items.map((item) => `${(item as { id: string }).id}@${(item as { revision: number }).revision}${(item as { deleted: number }).deleted ? ':deleted' : ''}`),
     });
+    lastSync.setToCurrentTime({ kind: 'clippings' });
     return c.json(page);
   });
 

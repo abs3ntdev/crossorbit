@@ -1,0 +1,6 @@
+allowBuilds:
+  better-sqlite3: true
+
+minimumReleaseAgeExclude:
+  - '@hono/node-server@2.1.8'
+  - kysely@0.29.9

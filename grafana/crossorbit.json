@@ -104,7 +104,7 @@
     },
     {
       "id": 2,
-      "title": "Postgres",
+      "title": "Database",
       "type": "stat",
       "gridPos": {
         "x": 4,
@@ -119,7 +119,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "crossorbit_dependency_up{dependency=\"postgres\"}",
+          "expr": "crossorbit_dependency_up{dependency=\"database\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",

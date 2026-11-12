@@ -27,7 +27,7 @@ if (config.metricsPort != null) {
       sql`SELECT 1`.execute(db).then(() => 1, () => 0),
       bookorbit.ping().then((ok) => (ok ? 1 : 0)),
     ]);
-    up.set({ dependency: 'postgres' }, database);
+    up.set({ dependency: 'database' }, database);
     up.set({ dependency: 'bookorbit' }, api);
     return c.text(await registry.metrics(), 200, { 'content-type': registry.contentType });
   });

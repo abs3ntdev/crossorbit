@@ -41,7 +41,7 @@ For SQLite, mount a volume at `/data` and set `DATABASE_URL=sqlite:/data/crossor
 
 ## Metrics
 
-`http://<container>:9090/metrics` serves Prometheus metrics. Each scrape also checks Postgres and the BookOrbit API key.
+`http://<container>:9090/metrics` serves Prometheus metrics. Each scrape also checks the database and the BookOrbit API key.
 
 ```yaml
 scrape_configs:
@@ -52,7 +52,7 @@ scrape_configs:
 
 | Metric | Meaning |
 |---|---|
-| `crossorbit_dependency_up{dependency}` | `postgres` (the configured database, Postgres or SQLite) or `bookorbit` answered the last scrape |
+| `crossorbit_dependency_up{dependency}` | `database` (Postgres or SQLite) or `bookorbit` answered the last scrape |
 | `crossorbit_last_sync_timestamp_seconds{kind}` | Last successful `progress` or `clippings` sync |
 | `crossorbit_progress_syncs_total{direction,status}` | Progress pushes and pulls |
 | `crossorbit_clippings_total{direction,kind}` | Clippings created, updated, deleted or skipped, to the device or to BookOrbit |

@@ -1,4 +1,4 @@
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 RUN npm install -g pnpm@10.34.9
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
@@ -10,7 +10,7 @@ RUN pnpm build && pnpm prune --prod --ignore-scripts \
   && rm -rf deps src binding.gyp \
   && find prebuilds -type f ! -name "linuxmusl-$(node -p process.arch).node" -delete
 
-FROM node:24-alpine
+FROM node:26-alpine
 LABEL org.opencontainers.image.source=https://github.com/abs3ntdev/crossorbit
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app

@@ -84,7 +84,7 @@ export function trackStorage(sql: Sql) {
     labelNames: ['state'] as const,
     registers: [registry],
     async collect() {
-      this.reset();
+      for (const state of ['live', 'unanchored', 'deleted']) this.set({ state }, 0);
       const rows = await sql<{ deleted: boolean; anchored: boolean; n: string }[]>`
         SELECT deleted, annotation_id IS NOT NULL AS anchored, count(*) AS n FROM clippings GROUP BY 1, 2`;
       for (const row of rows) {

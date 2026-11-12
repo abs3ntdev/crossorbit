@@ -35,8 +35,14 @@ if (config.metricsPort != null) {
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    for (const server of servers) server.close();
-    void db.destroy().then(() => process.exit(0));
+  process.once(signal, async () => {
+    log.info('shutting down', { signal });
+    setTimeout(() => {
+      log.warn('shutdown timed out');
+      process.exit(1);
+    }, 10_000).unref();
+    await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+    await db.destroy();
+    process.exit(0);
   });
 }

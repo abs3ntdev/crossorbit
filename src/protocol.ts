@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export const SYNC_VERSION = 2;
 export const TEXT_MAX_BYTES = 4096;
 export const BATCH_MAX = 50;
@@ -77,68 +79,83 @@ export function encodeItem(row: ClippingRow): Record<string, unknown> {
 
 export class ProtocolError extends Error {}
 
-function uint(o: Record<string, unknown>, key: string, max: number, fallback?: number): number {
-  const v = o[key];
-  if (v == null && fallback !== undefined) return fallback;
-  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > max) throw new ProtocolError(`Invalid ${key}`);
-  return v;
-}
+const uint = (max: number) => z.number().int().min(0).max(max);
+const withDefault = (max: number, fallback: number) => uint(max).nullish().transform((v) => v ?? fallback);
+const optional = (max: number) => uint(max).nullish().transform((v) => v ?? null);
 
-function optionalUint(o: Record<string, unknown>, key: string, max: number): number | null {
-  return o[key] == null ? null : uint(o, key, max);
+const itemBase = z.looseObject({ id: z.string().regex(ID_RE), deleted: withDefault(1, 0) });
+
+const liveItem = z
+  .looseObject({
+    text: z.string().min(1).refine((t) => Buffer.byteLength(t) <= TEXT_MAX_BYTES),
+    chapter: z.string().nullish(),
+    start_offset: optional(U32 - 1),
+    end_offset: optional(U32 - 1),
+  })
+  .refine((o) => (o.start_offset == null) === (o.end_offset == null), { message: 'Incomplete offsets', path: [] })
+  .refine((o) => o.start_offset == null || o.end_offset! > o.start_offset, { message: 'Offsets out of order', path: [] });
+
+const liveFields = z.looseObject({
+  spine: uint(U16),
+  start_page: withDefault(U16, 0),
+  end_page: withDefault(U16, 0),
+  pages: withDefault(U16, 1),
+  start_word: withDefault(U16, 0),
+  end_word: withDefault(U16, 0),
+  words: withDefault(U16, 0),
+  para: optional(U16 - 1),
+  created_at: withDefault(U32, 0),
+  layout_signature: withDefault(U32, 0),
+});
+
+const batch = z.object({ items: z.array(z.unknown()).max(BATCH_MAX) }, { error: 'Invalid items' });
+
+const pageQuery = z.object({
+  cursor: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(PAGE_MAX).default(DEFAULT_PAGE),
+});
+
+function parse<T extends z.ZodType>(schema: T, value: unknown, fallback: string): z.output<T> {
+  const result = schema.safeParse(value);
+  if (result.success) return result.data;
+  const issue = result.error.issues[0]!;
+  const key = issue.path[0];
+  throw new ProtocolError(key == null ? (issue.code === 'custom' ? issue.message : fallback) : `Invalid ${String(key)}`);
 }
 
 export function decodeItem(raw: unknown): IncomingItem {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new ProtocolError('Invalid item');
-  const o = raw as Record<string, unknown>;
-  if (typeof o.id !== 'string' || !ID_RE.test(o.id)) throw new ProtocolError('Invalid id');
-  const deleted = uint(o, 'deleted', 1, 0);
-  if (deleted === 1) return { id: o.id, deleted: true };
-  if (typeof o.text !== 'string' || o.text.length === 0 || Buffer.byteLength(o.text) > TEXT_MAX_BYTES) {
-    throw new ProtocolError('Invalid text');
-  }
-  if (o.chapter != null && typeof o.chapter !== 'string') throw new ProtocolError('Invalid chapter');
-  const start_offset = optionalUint(o, 'start_offset', U32 - 1);
-  const end_offset = optionalUint(o, 'end_offset', U32 - 1);
-  if ((start_offset == null) !== (end_offset == null)) throw new ProtocolError('Incomplete offsets');
-  if (start_offset != null && end_offset != null && end_offset <= start_offset) throw new ProtocolError('Offsets out of order');
+  const { id, deleted } = parse(itemBase, raw, 'Invalid item');
+  if (deleted === 1) return { id, deleted: true };
+  const o = { ...parse(liveItem, raw, 'Invalid item'), ...parse(liveFields, raw, 'Invalid item') };
   return {
-    id: o.id,
+    id,
     deleted: false,
-    spine: uint(o, 'spine', U16),
-    start_page: uint(o, 'start_page', U16, 0),
-    end_page: uint(o, 'end_page', U16, 0),
-    pages: uint(o, 'pages', U16, 1),
-    start_word: uint(o, 'start_word', U16, 0),
-    end_word: uint(o, 'end_word', U16, 0),
-    words: uint(o, 'words', U16, 0),
-    para: optionalUint(o, 'para', U16 - 1),
-    chapter: truncateUtf8(((o.chapter as string | undefined) ?? '').slice(0, CHAPTER_MAX), CHAPTER_MAX),
+    spine: o.spine,
+    start_page: o.start_page,
+    end_page: o.end_page,
+    pages: o.pages,
+    start_word: o.start_word,
+    end_word: o.end_word,
+    words: o.words,
+    para: o.para,
+    chapter: truncateUtf8((o.chapter ?? '').slice(0, CHAPTER_MAX), CHAPTER_MAX),
     text: o.text,
-    created_at: uint(o, 'created_at', U32, 0),
-    layout_signature: uint(o, 'layout_signature', U32, 0),
-    start_offset,
-    end_offset,
+    created_at: o.created_at,
+    layout_signature: o.layout_signature,
+    start_offset: o.start_offset,
+    end_offset: o.end_offset,
   };
 }
 
 export function decodeBatch(body: unknown): IncomingItem[] {
-  const items = (body as { items?: unknown } | null)?.items;
-  if (!Array.isArray(items) || items.length > BATCH_MAX) throw new ProtocolError('Invalid items');
-  return items.map(decodeItem);
+  return parse(batch, body, 'Invalid items').items.map(decodeItem);
 }
 
-export interface PageQuery {
-  cursor: number;
-  limit: number;
-}
+export type PageQuery = z.output<typeof pageQuery>;
 
 export function parsePageQuery(query: Record<string, string | undefined>): PageQuery {
-  const cursor = Number(query.cursor ?? 0);
-  const limit = Number(query.limit ?? DEFAULT_PAGE);
-  if (!Number.isSafeInteger(cursor) || cursor < 0) throw new ProtocolError('Invalid cursor');
-  if (!Number.isInteger(limit) || limit < 1 || limit > PAGE_MAX) throw new ProtocolError('Invalid limit');
-  return { cursor, limit };
+  return parse(pageQuery, query, 'Invalid query');
 }
 
 export function truncateUtf8(value: string, maxBytes: number): string {

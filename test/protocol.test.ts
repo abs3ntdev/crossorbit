@@ -93,3 +93,48 @@ describe('progress body', () => {
     expect(progressBody({ document: 'd', progress: '', percentage: 0.1, position: { xpath: '/body/p[2]' } }).progress).toBe('/body/p[2]');
   });
 });
+
+describe('validation edge cases', () => {
+  const live = { id: 'a1', spine: 0, text: 't' };
+
+  it.each([
+    [null, 'Invalid item'],
+    [[], 'Invalid item'],
+    [{ ...live, id: 5 }, 'Invalid id'],
+    [{ ...live, text: 'é'.repeat(2049) }, 'Invalid text'],
+    [{ ...live, chapter: 3 }, 'Invalid chapter'],
+    [{ ...live, spine: 1.5 }, 'Invalid spine'],
+    [{ ...live, spine: undefined }, 'Invalid spine'],
+    [{ ...live, para: 0xffff }, 'Invalid para'],
+    [{ ...live, created_at: 0x100000000 }, 'Invalid created_at'],
+    [{ ...live, start_offset: 0xffffffff, end_offset: 1 }, 'Invalid start_offset'],
+    [{ ...live, end_offset: 3 }, 'Incomplete offsets'],
+    [{ ...live, start_offset: 4, end_offset: 3 }, 'Offsets out of order'],
+  ])('rejects %j with message', (item, message) => {
+    expect(() => decodeItem(item)).toThrow(new ProtocolError(message));
+  });
+
+  it('accepts boundary values and applies defaults', () => {
+    expect(decodeItem({ ...live, text: 'é'.repeat(2048), spine: 0xffff, para: 0xfffe, layout_signature: 0xffffffff, start_offset: 0, end_offset: 0xfffffffe, chapter: null }))
+      .toEqual({
+        id: 'a1', deleted: false, spine: 0xffff, start_page: 0, end_page: 0, pages: 1, start_word: 0, end_word: 0, words: 0,
+        para: 0xfffe, chapter: '', text: 'é'.repeat(2048), created_at: 0, layout_signature: 0xffffffff, start_offset: 0, end_offset: 0xfffffffe,
+      });
+    expect(decodeItem({ id: '~'.repeat(64), deleted: 1, text: 5 })).toEqual({ id: '~'.repeat(64), deleted: true });
+  });
+
+  it('validates batches', () => {
+    expect(decodeBatch({ items: Array(50).fill({ id: 'a', deleted: 1 }) })).toHaveLength(50);
+    expect(() => decodeBatch(null)).toThrow(new ProtocolError('Invalid items'));
+    expect(() => decodeBatch({ items: {} })).toThrow(new ProtocolError('Invalid items'));
+  });
+
+  it('parses page query edges', () => {
+    expect(parsePageQuery({})).toEqual({ cursor: 0, limit: 50 });
+    expect(parsePageQuery({ cursor: String(Number.MAX_SAFE_INTEGER), limit: '100' })).toEqual({ cursor: Number.MAX_SAFE_INTEGER, limit: 100 });
+    expect(() => parsePageQuery({ cursor: 'x' })).toThrow(new ProtocolError('Invalid cursor'));
+    expect(() => parsePageQuery({ cursor: '1.5' })).toThrow(new ProtocolError('Invalid cursor'));
+    expect(() => parsePageQuery({ cursor: String(2 ** 53) })).toThrow(new ProtocolError('Invalid cursor'));
+    expect(() => parsePageQuery({ limit: '0' })).toThrow(new ProtocolError('Invalid limit'));
+  });
+});

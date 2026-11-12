@@ -29,19 +29,7 @@
     "crossorbit"
   ],
   "templating": {
-    "list": [
-      {
-        "name": "datasource",
-        "type": "datasource",
-        "query": "prometheus",
-        "label": "Prometheus",
-        "current": {
-          "selected": false,
-          "text": "${DS_PROMETHEUS}",
-          "value": "${DS_PROMETHEUS}"
-        }
-      }
-    ]
+    "list": []
   },
   "panels": [
     {
@@ -56,7 +44,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -65,7 +53,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -124,7 +112,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -133,7 +121,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -192,7 +180,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -201,7 +189,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -260,7 +248,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -269,7 +257,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -318,7 +306,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -327,7 +315,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -367,7 +355,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -376,7 +364,7 @@
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -420,7 +408,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -429,7 +417,7 @@
           "legendFormat": "{{direction}} {{status}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -456,7 +444,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -465,7 +453,7 @@
           "legendFormat": "{{direction}} {{kind}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         },
         {
@@ -474,7 +462,7 @@
           "legendFormat": "unplaced {{direction}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -501,7 +489,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -510,7 +498,7 @@
           "legendFormat": "{{route}} {{status}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -537,7 +525,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -546,7 +534,7 @@
           "legendFormat": "{{route}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -573,7 +561,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -582,7 +570,7 @@
           "legendFormat": "{{operation}} {{status}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -609,7 +597,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -618,7 +606,7 @@
           "legendFormat": "{{operation}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -645,7 +633,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -654,7 +642,7 @@
           "legendFormat": "{{state}}",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         },
         {
@@ -663,7 +651,7 @@
           "legendFormat": "documents",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],
@@ -690,7 +678,7 @@
       },
       "datasource": {
         "type": "prometheus",
-        "uid": "${datasource}"
+        "uid": "${DS_PROMETHEUS}"
       },
       "targets": [
         {
@@ -699,7 +687,7 @@
           "legendFormat": "rss",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         },
         {
@@ -708,7 +696,7 @@
           "legendFormat": "heap used",
           "datasource": {
             "type": "prometheus",
-            "uid": "${datasource}"
+            "uid": "${DS_PROMETHEUS}"
           }
         }
       ],

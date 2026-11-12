@@ -34,6 +34,14 @@ export function progressBody(raw: unknown): Record<string, unknown> {
   return body;
 }
 
+function isPosition(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function samePercentage(a: unknown, b: number) {
+  return typeof a === 'number' && Math.abs(a - b) < 1e-6;
+}
+
 export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
   const app = new Hono();
   const clippings = new ClippingService(sql, bookorbit, log);
@@ -70,7 +78,8 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
   app.put('/syncs/progress', async (c) => {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
-    const body = progressBody(await c.req.json().catch(() => ({})));
+    const raw = await c.req.json().catch(() => ({}));
+    const body = progressBody(raw);
     const res = await bookorbit.device('/syncs/progress', auth, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -78,7 +87,18 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     });
     log.info('progress pushed', { document: body.document, percentage: body.percentage, status: res.status });
     progressSyncs.inc({ direction: 'push', status: String(res.status) });
-    if (res.ok) lastSync.setToCurrentTime({ kind: 'progress' });
+    if (res.ok) {
+      lastSync.setToCurrentTime({ kind: 'progress' });
+      const position = (raw as { position?: unknown }).position;
+      const { document, progress, percentage } = body;
+      if (isPosition(position) && typeof document === 'string' && typeof percentage === 'number') {
+        await sql`
+          INSERT INTO positions (username, document, progress, percentage, position)
+          VALUES (${auth.user}, ${document}, ${String(progress ?? '')}, ${percentage}, ${sql.json(position as never)})
+          ON CONFLICT (username, document) DO UPDATE SET progress = EXCLUDED.progress,
+            percentage = EXCLUDED.percentage, position = EXCLUDED.position, updated_at = now()`;
+      }
+    }
     return relay(c, res);
   });
 
@@ -87,10 +107,20 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
     const res = await bookorbit.device(`/syncs/progress/${encodeURIComponent(document)}`, auth);
-    const body = await res.clone().json().catch(() => null) as { percentage?: number; device?: string } | null;
-    log.info('progress pulled', { document, status: res.status, percentage: body?.percentage ?? null, device: body?.device ?? null });
+    const body = await res.clone().json().catch(() => null) as { percentage?: number; progress?: string; device?: string } | null;
+    let restored = false;
+    if (res.ok && body) {
+      const [saved] = await sql<{ progress: string; percentage: number; position: Record<string, unknown> }[]>`
+        SELECT progress, percentage, position FROM positions WHERE username = ${auth.user} AND document = ${document}`;
+      if (saved && saved.progress === (body.progress ?? '') && samePercentage(body.percentage, saved.percentage)) {
+        restored = true;
+        Object.assign(body, { position: saved.position });
+      }
+    }
+    log.info('progress pulled', { document, status: res.status, percentage: body?.percentage ?? null, device: body?.device ?? null, position: restored });
     progressSyncs.inc({ direction: 'pull', status: String(res.status) });
     if (res.ok) lastSync.setToCurrentTime({ kind: 'progress' });
+    if (restored) return c.json(body);
     return relay(c, res);
   });
 

@@ -152,6 +152,20 @@ describe('kosync proxy', () => {
     const get = await call('GET', `/syncs/progress/${HASH}?position_kinds=locator,percentage`);
     expect(get.body).toMatchObject({ progress: '/body/DocFragment[1]/body/p[2]', percentage: 0.25 });
   });
+
+  it('restores the device position while BookOrbit progress is unchanged', async () => {
+    const position = { pctQ: 2500, spine: 3, page: 4, pages: 9, para: 12, xpath: '/body/DocFragment[4]/body/p[12]' };
+    await call('PUT', '/syncs/progress', { document: HASH, progress: '', percentage: 0.4, device: 'CrossPoint', device_id: 'abc', position });
+    const get = await call('GET', `/syncs/progress/${HASH}`);
+    expect(get.body).toMatchObject({ percentage: 0.4, position });
+  });
+
+  it('drops the stored position once progress moves elsewhere', async () => {
+    fake.progress.push({ document: HASH, progress: 'epubcfi(/6/8!/4/2)', percentage: 0.5, device: 'Web' });
+    const get = await call('GET', `/syncs/progress/${HASH}`);
+    expect(get.body).toMatchObject({ percentage: 0.5 });
+    expect(get.body).not.toHaveProperty('position');
+  });
 });
 
 describe('firmware clipping sequence', () => {

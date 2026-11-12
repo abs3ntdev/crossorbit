@@ -30,7 +30,7 @@ Device credentials are forwarded per request and never stored. Postgres holds th
 ## Unraid
 
 1. Docker tab, Add Container.
-2. Repository: the image you built, e.g. `crossorbit:latest` (`docker build -t crossorbit .` on the Unraid host).
+2. Repository: `ghcr.io/abs3ntdev/crossorbit:latest` for the newest release, or `:develop` to follow `main`. Every build is also tagged `sha-<commit>`.
 3. Network type: the bridge or custom network that can reach BookOrbit and Postgres.
 4. Add a port mapping: container `8080` to a host port of your choice.
 5. Add variables `DATABASE_URL`, `BOOKORBIT_URL`, `BOOKORBIT_API_KEY`, and optionally `LOG_LEVEL`.

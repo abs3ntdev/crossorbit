@@ -69,7 +69,7 @@ export function connect(url: string): Db {
     return new Kysely<Schema>({ dialect: new SqliteDialect({ database }), plugins: [sqliteValues] });
   }
   if (/^postgres(ql)?:\/\//.test(url)) {
-    return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: new pg.Pool({ connectionString: url, max: 10 }) }) });
+    return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: new pg.Pool({ connectionString: url, max: 3 }) }) });
   }
   throw new Error('DATABASE_URL must start with postgres://, postgresql:// or sqlite:');
 }

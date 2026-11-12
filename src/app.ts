@@ -61,20 +61,23 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const body = progressBody(await c.req.json().catch(() => ({})));
-    return relay(
-      c,
-      await bookorbit.device('/syncs/progress', auth, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-    );
+    const res = await bookorbit.device('/syncs/progress', auth, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    log.info('progress pushed', { document: body.document, percentage: body.percentage, status: res.status });
+    return relay(c, res);
   });
 
   app.get('/syncs/progress/:document', async (c) => {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
-    return relay(c, await bookorbit.device(`/syncs/progress/${encodeURIComponent(c.req.param('document'))}`, auth));
+    const document = c.req.param('document');
+    const res = await bookorbit.device(`/syncs/progress/${encodeURIComponent(document)}`, auth);
+    const body = await res.clone().json().catch(() => null) as { percentage?: number; device?: string } | null;
+    log.info('progress pulled', { document, status: res.status, percentage: body?.percentage ?? null, device: body?.device ?? null });
+    return relay(c, res);
   });
 
   app.get('/api/v1/clippings/:document', async (c) => {
@@ -84,7 +87,16 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
     const { cursor, limit } = parsePageQuery(c.req.query());
     const file = await clippings.resolve(document, auth);
-    return c.json(await clippings.page(document, file, cursor, limit));
+    const page = await clippings.page(document, file, cursor, limit);
+    log.info('clippings pulled', {
+      document,
+      bookFileId: file?.bookFileId ?? null,
+      cursor,
+      next: page.cursor,
+      more: page.more,
+      items: page.items.map((item) => `${(item as { id: string }).id}@${(item as { revision: number }).revision}${(item as { deleted: number }).deleted ? ':deleted' : ''}`),
+    });
+    return c.json(page);
   });
 
   app.put('/api/v1/clippings/:document', async (c) => {
@@ -96,6 +108,11 @@ export function createApp(sql: Sql, bookorbit: BookOrbit, log: Logger) {
     const file = await clippings.resolve(document, auth);
     if (!file) return c.json({ code: 2004, message: 'Book not found for the given document hash' }, 404);
     await clippings.apply(file, items);
+    log.info('clippings pushed', {
+      document,
+      bookFileId: file.bookFileId,
+      items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`),
+    });
     return c.json({ until: Math.floor(Date.now() / 1000), accepted: items.length });
   });
 

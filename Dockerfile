@@ -7,6 +7,7 @@ COPY src ./src
 RUN npm run build
 
 FROM node:24-alpine
+LABEL org.opencontainers.image.source=https://github.com/abs3ntdev/crossorbit
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY package.json package-lock.json ./

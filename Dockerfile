@@ -1,19 +1,18 @@
 FROM node:24-alpine AS build
-RUN apk add --no-cache python3 make g++
+RUN apk add --no-cache python3 make g++ && corepack enable
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+RUN pnpm build && pnpm prune --prod --ignore-scripts
 
 FROM node:24-alpine
 LABEL org.opencontainers.image.source=https://github.com/abs3ntdev/crossorbit
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
-RUN npm prune --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 RUN mkdir /data && chown node:node /data
 VOLUME /data

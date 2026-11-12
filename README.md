@@ -68,10 +68,11 @@ A Grafana dashboard is in `grafana/crossorbit.json`.
 ## Development
 
 ```sh
-npm ci
-npm run typecheck
-TEST_DATABASE_URL=postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test npm test
-TEST_DATABASE_URL=sqlite: npm test
+corepack enable
+pnpm install --frozen-lockfile
+pnpm typecheck
+TEST_DATABASE_URL=postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test pnpm test
+TEST_DATABASE_URL=sqlite: pnpm test
 ```
 
 The Postgres run drops and recreates the `public` schema of the test database and creates a scratch `crossorbit_upgrade_test` database to check upgrades from the legacy SQL migration runner. With `sqlite:` the suite uses a temporary file.

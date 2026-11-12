@@ -1,4 +1,21 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    }
+  ],
   "title": "crossorbit",
   "uid": "crossorbit",
   "schemaVersion": 39,
@@ -18,7 +35,11 @@
         "type": "datasource",
         "query": "prometheus",
         "label": "Prometheus",
-        "current": {}
+        "current": {
+          "selected": false,
+          "text": "${DS_PROMETHEUS}",
+          "value": "${DS_PROMETHEUS}"
+        }
       }
     ]
   },

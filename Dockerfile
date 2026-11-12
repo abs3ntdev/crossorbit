@@ -1,24 +1,25 @@
-FROM node:24-trixie-slim AS build
+FROM node:24-alpine AS build
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-RUN pnpm build && pnpm prune --prod --ignore-scripts && mkdir /data \
+RUN pnpm build && pnpm prune --prod --ignore-scripts \
   && cd node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3 \
   && rm -rf deps src binding.gyp \
-  && find prebuilds -type f ! -name "linux-$(node -p process.arch).node" -delete
+  && find prebuilds -type f ! -name "linuxmusl-$(node -p process.arch).node" -delete
 
-FROM gcr.io/distroless/nodejs24-debian13:nonroot
+FROM node:24-alpine
 LABEL org.opencontainers.image.source=https://github.com/abs3ntdev/crossorbit
 ENV NODE_ENV=production PORT=8080
 WORKDIR /app
 COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY --from=build --chown=nonroot:nonroot /data /data
+RUN mkdir /data && chown node:node /data
 VOLUME /data
+USER node
 EXPOSE 8080 9090
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["/nodejs/bin/node", "dist/healthcheck.js"]
-CMD ["dist/index.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["node", "dist/healthcheck.js"]
+CMD ["node", "dist/index.js"]

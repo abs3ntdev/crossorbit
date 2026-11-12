@@ -68,7 +68,7 @@ A Grafana dashboard is in `grafana/crossorbit.json`.
 ## Development
 
 ```sh
-npm install -g pnpm@10.34.9
+npm install -g pnpm@12.18.0
 pnpm install --frozen-lockfile
 pnpm typecheck
 TEST_DATABASE_URL=postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test pnpm test

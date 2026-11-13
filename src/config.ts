@@ -15,11 +15,27 @@ const required = (name: string) =>
       return value;
     });
 
+const port = (name: string, fallback: number, min: number) =>
+  z
+    .string()
+    .optional()
+    .transform((v, ctx) => {
+      const raw = v?.trim() || String(fallback);
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw) || value < min || value > 65535) {
+        ctx.addIssue({ code: 'custom', message: `${name} must be an integer between ${min} and 65535` });
+        return z.NEVER;
+      }
+      return value;
+    });
+
 const schema = z.object({
-  PORT: z.string().optional().transform((v) => Number(v ?? 8080)),
-  METRICS_PORT: z.string().optional().transform((v) => (v === '0' ? null : Number(v ?? 9090))),
+  PORT: port('PORT', 8080, 1),
+  METRICS_PORT: port('METRICS_PORT', 9090, 0).transform((v) => (v === 0 ? null : v)),
   DATABASE_URL: required('DATABASE_URL'),
-  BOOKORBIT_URL: required('BOOKORBIT_URL').transform((v) => v.replace(/\/+$/, '')),
+  BOOKORBIT_URL: required('BOOKORBIT_URL')
+    .pipe(z.url({ protocol: /^https?$/, error: 'BOOKORBIT_URL must be a valid http(s) URL' }))
+    .transform((v) => v.replace(/\/+$/, '')),
   BOOKORBIT_API_KEY: required('BOOKORBIT_API_KEY'),
   LOG_LEVEL: z
     .string()

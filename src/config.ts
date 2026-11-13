@@ -32,6 +32,7 @@ const port = (name: string, fallback: number, min: number) =>
 const schema = z.object({
   PORT: port('PORT', 8080, 1),
   METRICS_PORT: port('METRICS_PORT', 9090, 0).transform((v) => (v === 0 ? null : v)),
+  UI_PORT: port('UI_PORT', 8081, 0).transform((v) => (v === 0 ? null : v)),
   DATABASE_URL: required('DATABASE_URL'),
   BOOKORBIT_URL: required('BOOKORBIT_URL')
     .pipe(z.url({ protocol: /^https?$/, error: 'BOOKORBIT_URL must be a valid http(s) URL' }))
@@ -47,6 +48,7 @@ const schema = z.object({
 export interface Config {
   port: number;
   metricsPort: number | null;
+  uiPort: number | null;
   databaseUrl: string;
   bookorbitUrl: string;
   bookorbitApiKey: string;
@@ -60,6 +62,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: e.PORT,
     metricsPort: e.METRICS_PORT,
+    uiPort: e.UI_PORT,
     databaseUrl: e.DATABASE_URL,
     bookorbitUrl: e.BOOKORBIT_URL,
     bookorbitApiKey: e.BOOKORBIT_API_KEY,

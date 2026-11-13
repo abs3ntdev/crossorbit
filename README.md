@@ -1,6 +1,6 @@
 # crossorbit
 
-Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Point the device's KOReader sync server at this service and it translates CrossPoint reading progress and clippings into BookOrbit progress and annotations, in both directions. There is no UI and no background polling: BookOrbit is read only when the device syncs.
+Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Point the device's KOReader sync server at this service and it translates CrossPoint reading progress and clippings into BookOrbit progress and annotations, in both directions. A read-only status page runs on its own port. There is no background polling: BookOrbit is read only when the device syncs.
 
 ## What it does
 
@@ -8,6 +8,12 @@ Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Poi
 - `POST /users/create` answers 403. Create KOReader credentials in BookOrbit settings instead.
 - `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device. CrossPoint clippings carry no note or color, so annotations created from them have neither, and BookOrbit stamps them with the server's creation time rather than the device's.
 - `GET /healthz` checks the database.
+
+## Web UI
+
+`UI_PORT` (default `8081`) serves a read-only dashboard: a shelf of synced books with covers, device progress and highlight counts, per-book highlight lists, recent activity, and a problems page for unanchored highlights and books BookOrbit cannot find. Covers are proxied through `/covers/:bookId` so the API key never reaches the browser. Only `GET` routes exist, and the UI only reads the database and BookOrbit.
+
+The UI has no authentication. Expose it only through Pangolin (or a similar authenticating proxy), never directly.
 
 Device credentials are forwarded per request and never stored. The database (Postgres or SQLite) holds the document hash to book mapping, the clipping to annotation mapping with the device's layout fields, and tombstones. Book text is never persisted; parsed EPUBs are kept in a small in-memory cache.
 
@@ -20,6 +26,7 @@ Device credentials are forwarded per request and never stored. The database (Pos
 | `BOOKORBIT_API_KEY` | yes | | BookOrbit API key (`bok_...`) with read and write access, owned by the same user as the device credentials. |
 | `PORT` | no | `8080` | HTTP port. |
 | `METRICS_PORT` | no | `9090` | Prometheus metrics port, serving `/metrics`. `0` disables it. Keep it off the public proxy. |
+| `UI_PORT` | no | `8081` | Read-only web UI (shelf, highlights, activity, problems). `0` disables it. It has no authentication: put it behind Pangolin or another authenticating proxy. |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` or `error`. Logs are JSON lines. |
 
 ## Device setup

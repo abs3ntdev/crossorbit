@@ -20,6 +20,6 @@ COPY --from=build /app/dist ./dist
 RUN mkdir /data && chown node:node /data
 VOLUME /data
 USER node
-EXPOSE 8080 9090
+EXPOSE 8080 8081 9090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["node", "dist/healthcheck.js"]
 CMD ["node", "dist/index.js"]

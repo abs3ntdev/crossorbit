@@ -262,6 +262,12 @@ describe('firmware clipping sequence', () => {
     expect((await pullAll()).filter((i) => i.text === 'Second')).toHaveLength(0);
   });
 
+  it('serializes concurrent pushes of the same clipping', async () => {
+    const push = () => call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev4', 'Hello brave', 0)] });
+    await Promise.all([push(), push(), push()]);
+    expect(fake.annotations.filter((a) => a.text === 'Hello brave')).toHaveLength(1);
+  });
+
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });

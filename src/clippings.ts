@@ -23,6 +23,7 @@ const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 export class ClippingService {
   private readonly books = new Lru<number, Promise<EpubBook | null>>(8);
+  private readonly locks = new Map<string, Promise<void>>();
 
   constructor(
     private readonly db: Db,
@@ -62,8 +63,20 @@ export class ClippingService {
 
   async apply(file: ResolvedFile, items: IncomingItem[]): Promise<void> {
     for (const item of items) {
-      if (item.deleted) await this.applyDeletion(file, item.id);
-      else await this.applyLive(file, item);
+      await this.locked(`${file.bookFileId}:${item.id}`, () =>
+        item.deleted ? this.applyDeletion(file, item.id) : this.applyLive(file, item));
+    }
+  }
+
+  private async locked(key: string, fn: () => Promise<void>): Promise<void> {
+    const prev = this.locks.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.catch(() => {});
+    this.locks.set(key, tail);
+    try {
+      await run;
+    } finally {
+      if (this.locks.get(key) === tail) this.locks.delete(key);
     }
   }
 

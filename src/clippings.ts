@@ -8,7 +8,6 @@ import type { Logger } from './log.js';
 import { clippingsTransferred, clippingsUnanchored, epubLoads } from './metrics.js';
 import { CHAPTER_MAX, type ClippingRow, encodeItem, type IncomingItem, type LiveItem, SYNC_VERSION, TEXT_MAX_BYTES, truncateUtf8 } from './protocol.js';
 
-const MIRROR_BATCH = 50;
 const RESOLVE_TTL_MS = 10 * 60 * 1000;
 
 export interface ResolvedFile {
@@ -155,7 +154,7 @@ export class ClippingService {
       .$narrowType<{ annotation_id: number }>().execute();
     const known = new Set(mapped.map((m) => m.annotation_id));
 
-    const orphaned = mapped.filter((m) => !m.deleted && !present.has(m.annotation_id)).slice(0, MIRROR_BATCH);
+    const orphaned = mapped.filter((m) => !m.deleted && !present.has(m.annotation_id));
     if (orphaned.length) {
       clippingsTransferred.inc({ direction: 'to_device', kind: 'deleted' }, orphaned.length);
       await this.db.transaction().execute(async (tx) => {
@@ -166,7 +165,7 @@ export class ClippingService {
       });
     }
 
-    const candidates = annotations.filter((a) => !known.has(a.id)).slice(0, MIRROR_BATCH);
+    const candidates = annotations.filter((a) => !known.has(a.id));
     if (!candidates.length) return;
     const book = await this.book(file.bookFileId);
     if (!book) return;

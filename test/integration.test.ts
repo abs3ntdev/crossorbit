@@ -252,6 +252,16 @@ describe('firmware clipping sequence', () => {
     expect(row.annotation_id).toBe(moved[0].id);
   });
 
+  it('mirrors more than one batch of annotations', async () => {
+    for (let i = 0; i < 60; i++) {
+      fake.annotations.push({ id: 1000 + i, bookId: 1, cfi: 'epubcfi(/6/2!/4/4,/1:0,/1:6)', text: 'Second', chapterTitle: null, createdAt: new Date(Date.UTC(2025, 0, 1, 0, i)).toISOString() });
+    }
+    const items = await pullAll();
+    expect(items.filter((i) => i.text === 'Second' && i.deleted === 0)).toHaveLength(60);
+    fake.annotations = fake.annotations.filter((a) => a.id < 1000);
+    expect((await pullAll()).filter((i) => i.text === 'Second')).toHaveLength(0);
+  });
+
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });

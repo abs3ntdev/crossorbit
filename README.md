@@ -6,7 +6,7 @@ Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Poi
 
 - `GET /users/auth`, `PUT /syncs/progress`, `GET /syncs/progress/:document` are forwarded to BookOrbit's KOReader endpoints with the device credentials. The CrossPoint `position` object is stripped, and its `xpath` is used when `progress` is empty.
 - `POST /users/create` answers 403. Create KOReader credentials in BookOrbit settings instead.
-- `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device.
+- `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device. CrossPoint clippings carry no note or color, so annotations created from them have neither, and BookOrbit stamps them with the server's creation time rather than the device's.
 - `GET /healthz` checks the database.
 
 Device credentials are forwarded per request and never stored. The database (Postgres or SQLite) holds the document hash to book mapping, the clipping to annotation mapping with the device's layout fields, and tombstones. Book text is never persisted; parsed EPUBs are kept in a small in-memory cache.

@@ -239,6 +239,19 @@ describe('firmware clipping sequence', () => {
     expect((await pullAll()).find((i) => i.text === 'Hello')).toMatchObject({ deleted: 0 });
   });
 
+  it('re-anchors on offset moves and keeps the old annotation when the new anchor fails', async () => {
+    await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'world', 16)] });
+    const first = fake.annotations.find((a) => a.text === 'world')!;
+    await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'world', 1)] });
+    const moved = fake.annotations.filter((a) => a.text === 'world');
+    expect(moved).toHaveLength(1);
+    expect(moved[0].id).not.toBe(first.id);
+    await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'absent', 16)] });
+    expect(fake.annotations.some((a) => a.id === moved[0].id)).toBe(true);
+    const row = await db.selectFrom('clippings').select('annotation_id').where('clipping_id', '=', 'dev3').executeTakeFirstOrThrow();
+    expect(row.annotation_id).toBe(moved[0].id);
+  });
+
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });

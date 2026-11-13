@@ -87,11 +87,15 @@ export class ClippingService {
       .where('book_file_id', '=', file.bookFileId).where('clipping_id', '=', item.id).executeTakeFirst();
     if (existing?.deleted) return;
     let annotationId = existing?.annotation_id ?? null;
-    const moved = existing && (existing.text !== item.text || existing.spine !== item.spine);
+    const moved = existing && (existing.text !== item.text || existing.spine !== item.spine
+      || existing.start_offset !== item.start_offset || existing.end_offset !== item.end_offset);
     if (!existing || moved || annotationId == null) {
-      if (annotationId != null) await this.bookorbit.deleteAnnotation(file.bookId, annotationId);
-      annotationId = await this.createAnnotation(file, item);
-      if (annotationId != null) clippingsTransferred.inc({ direction: 'to_bookorbit', kind: existing ? 'updated' : 'created' });
+      const created = await this.createAnnotation(file, item);
+      if (created != null) {
+        if (annotationId != null) await this.bookorbit.deleteAnnotation(file.bookId, annotationId);
+        annotationId = created;
+        clippingsTransferred.inc({ direction: 'to_bookorbit', kind: existing ? 'updated' : 'created' });
+      }
     }
     const createdAt = item.created_at || Number(existing?.created_at ?? 0) || nowSeconds();
     const fields = {

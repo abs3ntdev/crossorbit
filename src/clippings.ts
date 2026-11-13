@@ -165,8 +165,9 @@ export class ClippingService {
     const candidates = annotations.filter((a) => !known.has(a.id)).slice(0, MIRROR_BATCH);
     if (!candidates.length) return;
     const book = await this.book(file.bookFileId);
+    if (!book) return;
     for (const annotation of candidates) {
-      const clipping = book && annotation.cfi ? cfiToClipping(book, annotation.cfi) : null;
+      const clipping = annotation.cfi ? cfiToClipping(book, annotation.cfi) : null;
       const createdAt = Math.floor(new Date(annotation.highlightedAt ?? annotation.createdAt).getTime() / 1000) || nowSeconds();
       const live = clipping && Buffer.byteLength(clipping.text) <= TEXT_MAX_BYTES;
       const id = live ? clippingIdFor(createdAt, clipping.text) : `bookorbit-${annotation.id}`;

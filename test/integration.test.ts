@@ -35,6 +35,7 @@ class FakeBookOrbit {
   progress: unknown[] = [];
   requests: string[] = [];
   nextId = 100;
+  failDownload = false;
   server!: Server;
   url = '';
 
@@ -67,6 +68,7 @@ class FakeBookOrbit {
       }
       if (req.headers['x-api-key'] !== API_KEY) return json(401);
       if (path === '/api/v1/books/files/11/serve') {
+        if (this.failDownload) return json(500);
         res.writeHead(200, { 'content-type': 'application/epub+zip' });
         return res.end(Buffer.from(fixtureEpub()));
       }
@@ -224,6 +226,17 @@ describe('firmware clipping sequence', () => {
     expect(byId.get('dev1')).toMatchObject({ deleted: 1 });
     expect(items.filter((i) => i.deleted === 1)).toHaveLength(3);
     expect(byId.get('dev2')).toMatchObject({ deleted: 0 });
+  });
+
+  it('retries mirroring when the EPUB download fails', async () => {
+    fake.annotations.push({ id: 8, bookId: 1, cfi: 'epubcfi(/6/2!/4/2,/1:0,/1:5)', text: 'Hello', chapterTitle: null, createdAt: '2026-01-02T00:00:00.000Z' });
+    fake.failDownload = true;
+    const shared = app;
+    app = createApp(db, new BookOrbit(fake.url, API_KEY), createLogger('error'));
+    const failed = await pullAll().finally(() => { app = shared; });
+    expect(failed.some((i) => i.id === 'bookorbit-8' || i.text === 'Hello')).toBe(false);
+    fake.failDownload = false;
+    expect((await pullAll()).find((i) => i.text === 'Hello')).toMatchObject({ deleted: 0 });
   });
 
   it('returns an empty page for unknown books', async () => {

@@ -15,6 +15,11 @@ export interface Annotation {
   highlightedAt?: string;
 }
 
+export interface BookMeta {
+  title: string | null;
+  authors: string[];
+}
+
 export class BookOrbitError extends Error {
   constructor(
     readonly status: number,
@@ -85,6 +90,17 @@ export class BookOrbit {
     const res = await timedFetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers }, timeoutMs);
     if (!res.ok && res.status !== 404) throw new BookOrbitError(res.status, `${init.method ?? 'GET'} ${path} failed with ${res.status}`);
     return res;
+  }
+
+  async getBook(bookId: number): Promise<BookMeta | null> {
+    const res = await this.api(`/books/${bookId}`);
+    if (res.status === 404) return null;
+    const body = (await res.json()) as { title: string | null; authors?: { name: string }[] };
+    return { title: body.title, authors: (body.authors ?? []).map((a) => a.name) };
+  }
+
+  cover(bookId: number): Promise<Response> {
+    return timedFetch(`${this.baseUrl}/api/v1/books/${bookId}/thumbnail`, { headers: { 'x-api-key': this.apiKey } }, this.timeouts.request);
   }
 
   async listAnnotations(bookId: number, bookFileId: number): Promise<Annotation[]> {

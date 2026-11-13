@@ -113,5 +113,7 @@ export function operationOf(path: string): string {
   if (/\/books\/\d+\/annotations\/\d+/.test(path)) return 'annotation_item';
   if (/\/books\/\d+\/annotations/.test(path)) return 'annotations';
   if (path.includes('/serve')) return 'epub_download';
+  if (/\/books\/\d+\/thumbnail$/.test(path)) return 'cover';
+  if (/\/books\/\d+$/.test(path)) return 'book';
   return 'other';
 }

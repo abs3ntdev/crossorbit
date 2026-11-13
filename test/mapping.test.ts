@@ -25,6 +25,8 @@ describe('offset <-> CFI', () => {
   it('falls back to quote search when offsets disagree', () => {
     expect(clippingToCfi(book, { spine: 0, text: 'brave  new', startOffset: 0, endOffset: 5 })).toBe('epubcfi(/6/2!/4/2,/1:6,/1:15)');
     expect(clippingToCfi(book, { spine: 0, text: 'absent', startOffset: null, endOffset: null })).toBeNull();
+    expect(clippingToCfi(book, { spine: 0, text: 'ra', startOffset: null, endOffset: null })).toBeNull();
+    expect(clippingToCfi(book, { spine: 0, text: 'ra', startOffset: 0, endOffset: 2 })).toBeNull();
   });
 
   it('round-trips across elements and astral characters', () => {

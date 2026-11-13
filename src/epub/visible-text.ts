@@ -61,7 +61,7 @@ export class VisibleTextMap {
     return out;
   }
 
-  // First occurrence, compared with whitespace collapsed on both sides.
+  // Unique occurrence, compared with whitespace collapsed on both sides.
   find(quote: string): { start: number; end: number } | null {
     const target = collapse(quote);
     if (!target) return null;
@@ -79,7 +79,7 @@ export class VisibleTextMap {
     }
     const haystack = chars.join('');
     const index = haystack.indexOf(target);
-    if (index < 0) return null;
+    if (index < 0 || haystack.indexOf(target, index + 1) >= 0) return null;
     const startCp = Array.from(haystack.slice(0, index)).length;
     const endCp = startCp + Array.from(target).length;
     return { start: offsets[startCp], end: offsets[endCp - 1] + 1 };

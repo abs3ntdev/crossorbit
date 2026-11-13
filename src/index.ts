@@ -9,6 +9,7 @@ import { loadConfig } from './config.js';
 import { connect, migrate } from './db.js';
 import { createLogger } from './log.js';
 import { registry, trackStorage, up } from './metrics.js';
+import { createUi } from './ui.js';
 
 const config = loadConfig();
 const log = createLogger(config.logLevel);
@@ -32,6 +33,11 @@ if (config.metricsPort != null) {
     return c.text(await registry.metrics(), 200, { 'content-type': registry.contentType });
   });
   servers.push(serve({ fetch: metrics.fetch, port: config.metricsPort }, ({ port }) => log.info('metrics listening', { port })));
+}
+
+if (config.uiPort != null) {
+  const ui = createUi(db, bookorbit, log);
+  servers.push(serve({ fetch: ui.fetch, port: config.uiPort }, ({ port }) => log.info('ui listening', { port })));
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

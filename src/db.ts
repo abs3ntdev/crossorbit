@@ -60,7 +60,7 @@ const sqliteValues: KyselyPlugin = {
   transformResult: async ({ result }) => result,
 };
 
-export function connect(url: string): Db {
+export function connect(url: string, onPoolError: (error: Error) => void = () => {}): Db {
   if (url.startsWith('sqlite:')) {
     const database = new SqliteDatabase(url.slice('sqlite:'.length));
     database.pragma('journal_mode = WAL');
@@ -69,7 +69,9 @@ export function connect(url: string): Db {
     return new Kysely<Schema>({ dialect: new SqliteDialect({ database }), plugins: [sqliteValues] });
   }
   if (/^postgres(ql)?:\/\//.test(url)) {
-    return new Kysely<Schema>({ dialect: new PostgresDialect({ pool: new pg.Pool({ connectionString: url, max: 3 }) }) });
+    const pool = new pg.Pool({ connectionString: url, max: 3 });
+    pool.on('error', onPoolError);
+    return new Kysely<Schema>({ dialect: new PostgresDialect({ pool }) });
   }
   throw new Error('DATABASE_URL must start with postgres://, postgresql:// or sqlite:');
 }

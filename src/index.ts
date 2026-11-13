@@ -13,7 +13,7 @@ import { createUi } from './ui.js';
 
 const config = loadConfig();
 const log = createLogger(config.logLevel);
-const db = connect(config.databaseUrl);
+const db = connect(config.databaseUrl, (error) => log.warn('idle database connection lost', { error: error.message }));
 await migrate(db);
 
 const bookorbit = new BookOrbit(config.bookorbitUrl, config.bookorbitApiKey);

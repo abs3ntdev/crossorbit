@@ -36,6 +36,7 @@ class FakeBookOrbit {
   requests: string[] = [];
   nextId = 100;
   failDownload = false;
+  hang = false;
   server!: Server;
   url = '';
 
@@ -46,6 +47,7 @@ class FakeBookOrbit {
       const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
       const path = req.url ?? '';
       this.requests.push(`${req.method} ${path}`);
+      if (this.hang) return;
       const json = (status: number, value?: unknown) => {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end(value === undefined ? '' : JSON.stringify(value));
@@ -271,6 +273,19 @@ describe('firmware clipping sequence', () => {
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });
+  });
+});
+
+describe('upstream timeouts', () => {
+  it('aborts hung BookOrbit requests', async () => {
+    const client = new BookOrbit(fake.url, API_KEY, { request: 50, download: 50 });
+    fake.hang = true;
+    try {
+      expect(await client.ping()).toBe(false);
+      await expect(client.downloadFile(11)).rejects.toThrow();
+    } finally {
+      fake.hang = false;
+    }
   });
 });
 

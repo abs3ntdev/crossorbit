@@ -26,11 +26,11 @@ export class BookOrbitError extends Error {
 
 const DEVICE_ID = 'crossorbit';
 
-async function timedFetch(url: string, init: RequestInit): Promise<Response> {
+async function timedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const operation = operationOf(new URL(url).pathname);
   const end = upstreamDuration.startTimer({ operation });
   try {
-    const res = await fetch(url, init);
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     upstreamRequests.inc({ operation, status: String(res.status) });
     return res;
   } catch (error) {
@@ -45,6 +45,7 @@ export class BookOrbit {
   constructor(
     readonly baseUrl: string,
     private readonly apiKey: string,
+    private readonly timeouts = { request: 30_000, download: 120_000 },
   ) {}
 
   device(path: string, auth: DeviceAuth, init: RequestInit = {}): Promise<Response> {
@@ -52,7 +53,7 @@ export class BookOrbit {
     headers.set('x-auth-user', auth.user);
     headers.set('x-auth-key', auth.key);
     headers.set('accept', 'application/json');
-    return timedFetch(`${this.baseUrl}/api/v1/koreader${path}`, { ...init, headers });
+    return timedFetch(`${this.baseUrl}/api/v1/koreader${path}`, { ...init, headers }, this.timeouts.request);
   }
 
   async resolve(document: string, auth: DeviceAuth): Promise<{ bookId: number; bookFileId: number } | null> {
@@ -70,18 +71,18 @@ export class BookOrbit {
 
   async ping(): Promise<boolean> {
     try {
-      const res = await timedFetch(`${this.baseUrl}/api/v1/auth/me`, { headers: { 'x-api-key': this.apiKey } });
+      const res = await timedFetch(`${this.baseUrl}/api/v1/auth/me`, { headers: { 'x-api-key': this.apiKey } }, this.timeouts.request);
       return res.ok;
     } catch {
       return false;
     }
   }
 
-  private async api(path: string, init: RequestInit = {}): Promise<Response> {
+  private async api(path: string, init: RequestInit = {}, timeoutMs = this.timeouts.request): Promise<Response> {
     const headers = new Headers(init.headers);
     headers.set('x-api-key', this.apiKey);
     if (init.body) headers.set('content-type', 'application/json');
-    const res = await timedFetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers });
+    const res = await timedFetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers }, timeoutMs);
     if (!res.ok && res.status !== 404) throw new BookOrbitError(res.status, `${init.method ?? 'GET'} ${path} failed with ${res.status}`);
     return res;
   }
@@ -104,7 +105,7 @@ export class BookOrbit {
   }
 
   async downloadFile(fileId: number): Promise<Uint8Array> {
-    const res = await this.api(`/books/files/${fileId}/serve`);
+    const res = await this.api(`/books/files/${fileId}/serve`, {}, this.timeouts.download);
     if (res.status === 404) throw new BookOrbitError(404, 'Book file not found');
     return new Uint8Array(await res.arrayBuffer());
   }

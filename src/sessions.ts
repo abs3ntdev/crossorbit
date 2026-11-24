@@ -50,8 +50,7 @@ export class SessionService {
 
   /** Stores every session, uploads pending ones and returns the ids to acknowledge. */
   async upload(auth: DeviceAuth, batch: SessionBatch): Promise<string[]> {
-    const res = await this.bookorbit.device('/users/auth', auth);
-    if (res.status === 401) throw new BookOrbitError(401, 'Unauthorized');
+    await this.bookorbit.checkDevice(auth);
     const deviceId = batch.device_id ?? '';
     for (const item of batch.items) {
       await this.db.insertInto('reading_sessions').values({

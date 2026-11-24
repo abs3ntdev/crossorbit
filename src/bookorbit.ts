@@ -36,7 +36,28 @@ export class BookOrbitError extends Error {
   }
 }
 
+/** Optional title and author the device reported, sent with match-check so BookOrbit can list and suggest unmatched books. */
+export interface DocumentHint {
+  title: string | null;
+  authors: string | null;
+}
+
 const DEVICE_ID = 'crossorbit';
+const MD5_RE = /^[0-9a-f]{32}$/i;
+const AUTH_TTL_MS = 60_000;
+const AUTH_CACHE_MAX = 1000;
+
+/** BookOrbit's error message, if the body carries one. */
+async function upstreamMessage(res: Response): Promise<string | null> {
+  const body = (await res.json().catch(() => null)) as { message?: unknown } | null;
+  const message = Array.isArray(body?.message) ? body.message.join(', ') : body?.message;
+  return typeof message === 'string' && message ? message : null;
+}
+
+async function failure(res: Response, what: string): Promise<BookOrbitError> {
+  const message = await upstreamMessage(res);
+  return new BookOrbitError(res.status, `${what} failed with ${res.status}${message ? `: ${message}` : ''}`);
+}
 
 async function timedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const operation = operationOf(new URL(url).pathname);
@@ -54,6 +75,8 @@ async function timedFetch(url: string, init: RequestInit, timeoutMs: number): Pr
 }
 
 export class BookOrbit {
+  private readonly verified = new Map<string, number>();
+
   constructor(
     readonly baseUrl: string,
     private readonly apiKey: string,
@@ -68,14 +91,43 @@ export class BookOrbit {
     return timedFetch(`${this.baseUrl}/api/v1/koreader${path}`, { ...init, headers }, this.timeouts.request);
   }
 
-  async resolve(document: string, auth: DeviceAuth): Promise<{ bookId: number; bookFileId: number } | null> {
+  /** Checks device credentials, remembering a success for a minute so paged syncs do not re-check every page. */
+  async checkDevice(auth: DeviceAuth): Promise<void> {
+    const key = `${auth.user}\0${auth.key}`;
+    const expires = this.verified.get(key);
+    if (expires && expires > Date.now()) return;
+    const res = await this.device('/users/auth', auth);
+    if (res.status === 401) {
+      this.verified.delete(key);
+      throw new BookOrbitError(401, 'Unauthorized');
+    }
+    if (!res.ok) throw await failure(res, 'device auth');
+    if (this.verified.size >= AUTH_CACHE_MAX) this.verified.clear();
+    this.verified.set(key, Date.now() + AUTH_TTL_MS);
+  }
+
+  /** Forgets cached credentials, e.g. after BookOrbit rejected them on another route. */
+  forgetDevice(auth: DeviceAuth): void {
+    this.verified.delete(`${auth.user}\0${auth.key}`);
+  }
+
+  async resolve(document: string, auth: DeviceAuth, hint?: DocumentHint | null): Promise<{ bookId: number; bookFileId: number } | null> {
+    // BookOrbit only matches MD5 document hashes and rejects anything else with 400.
+    if (!MD5_RE.test(document)) {
+      await this.checkDevice(auth);
+      return null;
+    }
+    const hash = document.toLowerCase();
+    const books = hint && (hint.title || hint.authors)
+      ? [{ hash, source: 'current_file', ...(hint.title ? { title: hint.title.slice(0, 500) } : {}), ...(hint.authors ? { authors: hint.authors.slice(0, 1000) } : {}) }]
+      : undefined;
     const res = await this.device('/plugin/match-check', auth, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ deviceId: DEVICE_ID, deviceModel: 'CrossPoint', pluginVersion: '1.0.0', hashes: [document] }),
+      body: JSON.stringify({ deviceId: DEVICE_ID, deviceModel: 'CrossPoint', pluginVersion: '1.0.0', hashes: [hash], ...(books ? { books } : {}) }),
     });
     if (res.status === 401) throw new BookOrbitError(401, 'Unauthorized');
-    if (!res.ok) throw new BookOrbitError(res.status, `match-check failed with ${res.status}`);
+    if (!res.ok) throw await failure(res, 'match-check');
     const body = (await res.json()) as { matches?: { hash: string; bookId: number; bookFileId: number }[] };
     const match = body.matches?.find((m) => m.hash.toLowerCase() === document.toLowerCase());
     return match ? { bookId: match.bookId, bookFileId: match.bookFileId } : null;
@@ -95,7 +147,7 @@ export class BookOrbit {
     headers.set('x-api-key', this.apiKey);
     if (init.body) headers.set('content-type', 'application/json');
     const res = await timedFetch(`${this.baseUrl}/api/v1${path}`, { ...init, headers }, timeoutMs);
-    if (!res.ok && res.status !== 404) throw new BookOrbitError(res.status, `${init.method ?? 'GET'} ${path} failed with ${res.status}`);
+    if (!res.ok && res.status !== 404) throw await failure(res, `${init.method ?? 'GET'} ${path}`);
     return res;
   }
 

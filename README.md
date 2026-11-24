@@ -4,12 +4,16 @@ Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Poi
 
 ## What it does
 
-- `GET /users/auth`, `PUT /syncs/progress`, `GET /syncs/progress/:document` are forwarded to BookOrbit's KOReader endpoints with the device credentials. The CrossPoint `position` object is stripped, and its `xpath` is used when `progress` is empty.
+- `GET /users/auth`, `PUT /syncs/progress`, `GET /syncs/progress/:document` are forwarded to BookOrbit's KOReader endpoints with the device credentials. The CrossPoint `position` object is validated and stripped (its `xpath` is used when `progress` is empty), and it is restored on pull while BookOrbit still holds the same position. The progress `metadata` title and authors are sent with BookOrbit's match-check, so books it cannot match appear under its unmatched books with link suggestions. A push for a book BookOrbit does not know yet is kept and answered with success, as kosync servers do, and replayed on the next pull for that book.
 - `POST /users/create` answers 403. Create KOReader credentials in BookOrbit settings instead.
 - `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device. CrossPoint clippings carry no note or color, so annotations created from them have neither, and BookOrbit stamps them with the server's creation time rather than the device's.
 - `GET`/`PUT /api/v1/bookmarks/:document` speak CrossPoint's bookmark sync (sync version 2, firmware with PR #4531). Device bookmarks become BookOrbit bookmarks: the crengine XPointer is converted to an EPUB CFI (falling back to the start of the chapter when the exact spot cannot be found), and the title is the bookmark name, else its summary, else `Bookmark`. Renaming on the device renames the BookOrbit bookmark and deleting it deletes it. When the device starts a sync, BookOrbit bookmarks are pulled down (their CFI converted to an XPointer, with the id derived from it as the device expects), BookOrbit renames update the device name, and deletions become device deletions.
 - `PUT /api/v1/stats/sessions` receives the device's reading-session log and records each session as a BookOrbit reading session (`crosspoint:<session_id>`, deduplicated by BookOrbit). Every well-formed session is acknowledged at once so the device keeps moving; sessions for books BookOrbit cannot match yet, or whose upload fails, are kept and retried on later uploads.
 - `GET /healthz` checks the database.
+
+Clippings and bookmarks uploaded for a book BookOrbit cannot match yet are acknowledged and kept, then sent to BookOrbit on the first sync after it matches (for example once the book is linked under BookOrbit's unmatched books). Only MD5 document hashes are sent to BookOrbit's match-check; other document ids are accepted but stay unmatched. Malformed requests get crosspoint-sync's errors: `403` with code `2004` for a bad document and `2003` for a bad body or query. Successful device credential checks are cached for a minute so paged syncs do not re-check every page.
+
+crossorbit is single-user by design: one `BOOKORBIT_API_KEY` writes every annotation, bookmark and session, so device credentials and the API key must belong to the same BookOrbit user, and the document mapping is shared.
 
 ## Web UI
 
@@ -25,7 +29,7 @@ Device credentials are forwarded per request and never stored. The database (Pos
 | --- | --- | --- | --- |
 | `DATABASE_URL` | yes | | `postgres://...` / `postgresql://...` for Postgres, or `sqlite:<path>` (e.g. `sqlite:/data/crossorbit.db`) for SQLite. Migrations run at startup. |
 | `BOOKORBIT_URL` | yes | | BookOrbit base URL, e.g. `http://bookorbit:3000`. |
-| `BOOKORBIT_API_KEY` | yes | | BookOrbit API key (`bok_...`) with read and write access, owned by the same user as the device credentials. |
+| `BOOKORBIT_API_KEY` | yes | | BookOrbit API key (`bok_...`) with read and write access, owned by the same user as the device credentials. A read-only key makes uploads fail with a 502 that names the problem. |
 | `PORT` | no | `8080` | HTTP port. |
 | `METRICS_PORT` | no | `9090` | Prometheus metrics port, serving `/metrics`. `0` disables it. Keep it off the public proxy. |
 | `UI_PORT` | no | `8081` | Read-only web UI (shelf, highlights, activity, problems). `0` disables it. It has no authentication: put it behind Pangolin or another authenticating proxy. |

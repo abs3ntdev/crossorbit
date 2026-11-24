@@ -158,6 +158,45 @@ export function parsePageQuery(query: Record<string, string | undefined>): PageQ
   return parse(pageQuery, query, 'Invalid query');
 }
 
+/** CrossPoint's rich reading position, validated as crosspoint-sync does (models/position.ts). */
+export interface RichPosition {
+  pctQ: number;
+  spine: number;
+  page: number;
+  pages: number;
+  para?: number;
+  li?: number;
+  anchor?: string;
+  xpath?: string;
+}
+
+export const POSITION_XPATH_MAX = 120;
+const POSITION_ANCHOR_MAX = 48;
+
+const isUint = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= max;
+
+/** Returns the normalized position, or null when any field is out of range. */
+export function parsePosition(raw: unknown): RichPosition | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (!isUint(o.pctQ, 1_000_000) || !isUint(o.spine, U16) || !isUint(o.page, U16) || !isUint(o.pages, U16)) return null;
+  const pos: RichPosition = { pctQ: o.pctQ, spine: o.spine, page: o.page, pages: o.pages };
+  for (const key of ['para', 'li'] as const) {
+    if (o[key] === undefined) continue;
+    if (!isUint(o[key], U16)) return null;
+    pos[key] = o[key];
+  }
+  if (o.anchor !== undefined) {
+    if (typeof o.anchor !== 'string' || Buffer.byteLength(o.anchor) > POSITION_ANCHOR_MAX) return null;
+    pos.anchor = o.anchor;
+  }
+  if (o.xpath !== undefined) {
+    if (typeof o.xpath !== 'string' || Buffer.byteLength(o.xpath) > POSITION_XPATH_MAX) return null;
+    pos.xpath = o.xpath;
+  }
+  return pos;
+}
+
 export function truncateUtf8(value: string, maxBytes: number): string {
   let out = '';
   for (const ch of value) {

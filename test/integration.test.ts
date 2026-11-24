@@ -18,6 +18,7 @@ import { fixtureEpub } from './fixture.js';
 const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test';
 const SQLITE = DATABASE_URL.startsWith('sqlite:');
 const HASH = '0123456789abcdef0123456789abcdef';
+const LATE = 'fedcba9876543210fedcba9876543210';
 const AUTH = { 'x-auth-user': 'reader', 'x-auth-key': '5f4dcc3b5aa765d61d8327deb882cf99' };
 const API_KEY = 'bok_test';
 
@@ -37,6 +38,9 @@ class FakeBookOrbit {
   nextId = 100;
   failDownload = false;
   hang = false;
+  lateKnown = false;
+  forbidden = false;
+  matchBodies: Record<string, unknown>[] = [];
   server!: Server;
   url = '';
 
@@ -59,16 +63,22 @@ class FakeBookOrbit {
         if (path === '/api/v1/koreader/users/auth') return json(200, { authorized: 'OK', username: 'reader' });
         if (path === '/api/v1/koreader/plugin/match-check') {
           if (!body.deviceId || !body.deviceModel || !body.pluginVersion) return json(400);
-          return json(201, { matches: body.hashes.includes(HASH) ? [{ hash: HASH, bookId: 1, bookFileId: 11 }] : [], libraryVersion: 'v' });
+          if (!body.hashes.every((h: string) => /^[0-9a-f]{32}$/i.test(h))) return json(400, { message: ['each value in hashes must match'] });
+          this.matchBodies.push(body);
+          const matches = body.hashes.includes(HASH) ? [{ hash: HASH, bookId: 1, bookFileId: 11 }] : [];
+          if (this.lateKnown && body.hashes.includes(LATE)) matches.push({ hash: LATE, bookId: 1, bookFileId: 11 });
+          return json(201, { matches, libraryVersion: 'v' });
         }
         if (path === '/api/v1/koreader/syncs/progress' && req.method === 'PUT') {
           if ('position' in body) return json(400, { message: 'property position should not exist' });
+          if (body.document !== HASH && !(this.lateKnown && body.document === LATE)) return json(404, { message: 'Book not found for the given document hash' });
           this.progress.push(body);
           return json(200, { document: body.document, timestamp: 1 });
         }
         if (path.startsWith('/api/v1/koreader/syncs/progress/')) return json(200, this.progress.at(-1) ?? {});
       }
       if (req.headers['x-api-key'] !== API_KEY) return json(401);
+      if (this.forbidden && req.method !== 'GET') return json(403, { message: 'This API key is read-only', errorCode: 'API_KEY_READ_ONLY' });
       if (path === '/api/v1/books/files/11/serve') {
         if (this.failDownload) return json(500);
         res.writeHead(200, { 'content-type': 'application/epub+zip' });
@@ -273,6 +283,84 @@ describe('firmware clipping sequence', () => {
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', `/api/v1/clippings/ffffffffffffffffffffffffffffffff?cursor=0&limit=1&format=reader`);
     expect(res.body).toMatchObject({ sync_version: 2, cursor: 0, more: false, items: [] });
+  });
+});
+
+describe('unmatched books and fixes from the audit', () => {
+  it('accepts clippings and progress for an unmatched book and replays them once it matches', async () => {
+    const put = await call('PUT', `/api/v1/clippings/${LATE}`, { items: [clip('late1', 'Hello', 0)] });
+    expect(put).toEqual({ status: 200, body: { until: expect.any(Number), accepted: 1 } });
+    const progress = await call('PUT', '/syncs/progress', {
+      document: LATE, progress: '/body/DocFragment[1]/body/p[1]', percentage: 0.1, device: 'CrossPoint', device_id: 'abc',
+      metadata: { title: 'Late Book', authors: 'A. Writer' },
+    });
+    expect(progress).toEqual({ status: 200, body: { document: LATE, timestamp: expect.any(Number) } });
+    expect(fake.matchBodies.at(-1)).toMatchObject({
+      hashes: [LATE], books: [{ hash: LATE, source: 'current_file', title: 'Late Book', authors: 'A. Writer' }],
+    });
+    const pendingRows = await db.selectFrom('pending_items').select(['document', 'item_id']).execute();
+    expect(pendingRows).toEqual([{ document: LATE, item_id: 'late1' }]);
+
+    fake.lateKnown = true;
+    const pulled = await call('GET', `/syncs/progress/${LATE}`);
+    expect(pulled.body).toMatchObject({ document: LATE, percentage: 0.1 });
+    expect(await db.selectFrom('pending_progress').selectAll().execute()).toEqual([]);
+
+    const page = await call('GET', `/api/v1/clippings/${LATE}?cursor=0&limit=50&format=reader`);
+    expect(page.status).toBe(200);
+    const row = await db.selectFrom('clippings').select(['deleted', 'text', 'annotation_id']).where('clipping_id', '=', 'late1').executeTakeFirstOrThrow();
+    expect(row).toMatchObject({ text: 'Hello' });
+    expect(Boolean(row.deleted)).toBe(false);
+    expect(fake.annotations.some((a) => a.id === row.annotation_id)).toBe(true);
+    expect(await db.selectFrom('pending_items').selectAll().execute()).toEqual([]);
+  });
+
+  it('never sends non-MD5 documents to match-check', async () => {
+    const before = fake.matchBodies.length;
+    const put = await call('PUT', '/api/v1/clippings/book.epub', { items: [clip('odd1', 'Hello', 0)] });
+    expect(put.body).toMatchObject({ accepted: 1 });
+    expect((await call('GET', '/api/v1/clippings/book.epub?cursor=0&limit=1')).body).toMatchObject({ items: [], more: false });
+    expect(fake.matchBodies.length).toBe(before);
+    const bad = await call('PUT', '/api/v1/clippings/book.epub', { items: [] }, { 'x-auth-user': 'x', 'x-auth-key': 'y' });
+    expect(bad.status).toBe(401);
+  });
+
+  it('answers malformed requests like crosspoint-sync', async () => {
+    expect(await call('GET', '/api/v1/clippings/bad%20doc?cursor=0')).toEqual({ status: 403, body: { code: 2004, message: "Field 'document' not provided." } });
+    expect((await call('PUT', `/api/v1/clippings/${HASH}`, { items: [{ id: '' }] })).body).toMatchObject({ code: 2003 });
+    expect((await call('GET', `/api/v1/clippings/${HASH}?cursor=-1`)).status).toBe(403);
+  });
+
+  it('stores only valid rich positions', async () => {
+    await db.deleteFrom('positions').execute();
+    const send = (position: unknown) => call('PUT', '/syncs/progress', { document: HASH, progress: '/x', percentage: 0.3, device: 'CrossPoint', device_id: 'abc', position });
+    await send({ pctQ: 2_000_000, spine: 0, page: 0, pages: 1 });
+    await send({ pctQ: 1, spine: 70000, page: 0, pages: 1 });
+    await send({ pctQ: 1, spine: 0, page: 0, pages: 1, xpath: 'x'.repeat(121) });
+    expect(await db.selectFrom('positions').selectAll().execute()).toEqual([]);
+    await send({ pctQ: 300000, spine: 2, page: 1, pages: 4, para: 3, extra: 'dropped' });
+    const row = await db.selectFrom('positions').select('position').executeTakeFirstOrThrow();
+    expect(typeof row.position === 'string' ? JSON.parse(row.position) : row.position).toEqual({ pctQ: 300000, spine: 2, page: 1, pages: 4, para: 3 });
+  });
+
+  it('checks device credentials once per minute across paged pulls', async () => {
+    await pullAll();
+    const before = fake.requests.filter((r) => r.endsWith('/koreader/users/auth')).length;
+    await pullAll();
+    await pullAll();
+    expect(fake.requests.filter((r) => r.endsWith('/koreader/users/auth')).length).toBe(before);
+  });
+
+  it('explains a refused API key', async () => {
+    fake.forbidden = true;
+    try {
+      const res = await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('ro1', 'Hello brave new', 0)] });
+      expect(res.status).toBe(502);
+      expect(res.body.message).toContain('API key');
+      expect(res.body.message).toContain('This API key is read-only');
+    } finally {
+      fake.forbidden = false;
+    }
   });
 });
 

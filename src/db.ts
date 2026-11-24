@@ -72,6 +72,28 @@ export interface Schema {
     created_at: Generated<Date | string>;
     uploaded_at: Date | string | null;
   };
+  pending_items: {
+    username: string;
+    document: string;
+    kind: string;
+    item_id: string;
+    payload: unknown;
+    updated_at: Generated<Date | string>;
+  };
+  pending_progress: {
+    username: string;
+    document: string;
+    body: unknown;
+    timestamp: string | number;
+    updated_at: Generated<Date | string>;
+  };
+  document_hints: {
+    username: string;
+    document: string;
+    title: string | null;
+    authors: string | null;
+    updated_at: Generated<Date | string>;
+  };
 }
 
 export type Db = Kysely<Schema>;
@@ -227,6 +249,38 @@ const migrations: Record<string, Migration> = {
         .addPrimaryKeyConstraint('reading_sessions_pkey', ['username', 'session_id'])
         .execute();
       await db.schema.createIndex('reading_sessions_status').on('reading_sessions').columns(['username', 'status']).execute();
+    },
+  },
+  '005_pending': {
+    async up(db) {
+      const pg = !isSqlite(db);
+      const ts = pg ? 'timestamptz' : 'text';
+      const json = pg ? 'jsonb' : 'text';
+      await db.schema.createTable('pending_items')
+        .addColumn('username', 'text', (c) => c.notNull())
+        .addColumn('document', 'text', (c) => c.notNull())
+        .addColumn('kind', 'text', (c) => c.notNull())
+        .addColumn('item_id', 'text', (c) => c.notNull())
+        .addColumn('payload', json, (c) => c.notNull())
+        .addColumn('updated_at', ts, (c) => c.notNull().defaultTo(now(db)))
+        .addPrimaryKeyConstraint('pending_items_pkey', ['username', 'document', 'kind', 'item_id'])
+        .execute();
+      await db.schema.createTable('pending_progress')
+        .addColumn('username', 'text', (c) => c.notNull())
+        .addColumn('document', 'text', (c) => c.notNull())
+        .addColumn('body', json, (c) => c.notNull())
+        .addColumn('timestamp', 'bigint', (c) => c.notNull())
+        .addColumn('updated_at', ts, (c) => c.notNull().defaultTo(now(db)))
+        .addPrimaryKeyConstraint('pending_progress_pkey', ['username', 'document'])
+        .execute();
+      await db.schema.createTable('document_hints')
+        .addColumn('username', 'text', (c) => c.notNull())
+        .addColumn('document', 'text', (c) => c.notNull())
+        .addColumn('title', 'text')
+        .addColumn('authors', 'text')
+        .addColumn('updated_at', ts, (c) => c.notNull().defaultTo(now(db)))
+        .addPrimaryKeyConstraint('document_hints_pkey', ['username', 'document'])
+        .execute();
     },
   },
 };

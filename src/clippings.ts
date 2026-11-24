@@ -36,12 +36,13 @@ export class ClippingService {
     const cached = await this.db.selectFrom('documents').select(['book_id', 'book_file_id', 'resolved_at'])
       .where('document', '=', key).executeTakeFirst();
     if (cached && Date.now() - new Date(cached.resolved_at).getTime() < RESOLVE_TTL_MS) {
-      // Cached mappings still need the device credentials checked on every request.
-      const res = await this.bookorbit.device('/users/auth', auth);
-      if (res.status === 401) throw new BookOrbitError(401, 'Unauthorized');
+      // Cached mappings still need the device credentials checked (briefly cached by the client).
+      await this.bookorbit.checkDevice(auth);
       return { bookId: cached.book_id, bookFileId: cached.book_file_id };
     }
-    const match = await this.bookorbit.resolve(key, auth);
+    const hint = await this.db.selectFrom('document_hints').select(['title', 'authors'])
+      .where('username', '=', auth.user).where('document', '=', key).executeTakeFirst();
+    const match = await this.bookorbit.resolve(key, auth, hint);
     if (!match) return null;
     await this.db.insertInto('documents').values({ document: key, book_id: match.bookId, book_file_id: match.bookFileId })
       .onConflict((oc) => oc.column('document').doUpdateSet({ book_id: match.bookId, book_file_id: match.bookFileId, resolved_at: now(this.db) }))

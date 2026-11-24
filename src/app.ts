@@ -2,16 +2,17 @@ import { Hono, type Context } from 'hono';
 import { sql } from 'kysely';
 
 import { BookOrbit, BookOrbitError, type DeviceAuth } from './bookorbit.js';
-import { BookmarkService, decodeBookmarkBatch, parseBookmarkQuery } from './bookmarks.js';
-import { ClippingService } from './clippings.js';
+import { BookmarkService, decodeBookmarkBatch, type IncomingBookmark, parseBookmarkQuery } from './bookmarks.js';
+import { ClippingService, type ResolvedFile } from './clippings.js';
 import { decodeSessionBatch, SessionService } from './sessions.js';
 import { type Db, now } from './db.js';
 import type { Logger } from './log.js';
 import { httpDuration, httpRequests, lastSync, progressSyncs } from './metrics.js';
-import { decodeBatch, parsePageQuery, ProtocolError } from './protocol.js';
+import { PendingStore } from './pending.js';
+import { decodeBatch, type IncomingItem, parsePageQuery, parsePosition, POSITION_XPATH_MAX, ProtocolError } from './protocol.js';
 
 const DOCUMENT_RE = /^[A-Za-z0-9._-]{1,64}$/;
-const XPATH_MAX = 120;
+const HINT_MAX = 512;
 
 function deviceAuth(c: Context): DeviceAuth | null {
   const user = c.req.header('x-auth-user');
@@ -21,6 +22,17 @@ function deviceAuth(c: Context): DeviceAuth | null {
 
 function unauthorized(c: Context) {
   return c.json({ code: 2001, message: 'Unauthorized' }, 401);
+}
+
+class DocumentError extends Error {
+  constructor() {
+    super("Field 'document' not provided.");
+  }
+}
+
+/** crosspoint-sync answers a malformed document with 403 / 2004. */
+function checkDocument(document: string) {
+  if (!DOCUMENT_RE.test(document)) throw new DocumentError();
 }
 
 async function relay(c: Context, res: Response) {
@@ -33,12 +45,17 @@ export function progressBody(raw: unknown): Record<string, unknown> {
   const body = { ...(raw as Record<string, unknown>) };
   const position = body.position as { xpath?: unknown } | undefined;
   delete body.position;
-  if (!body.progress && typeof position?.xpath === 'string' && position.xpath.length <= XPATH_MAX) body.progress = position.xpath;
+  if (!body.progress && typeof position?.xpath === 'string' && Buffer.byteLength(position.xpath) <= POSITION_XPATH_MAX) body.progress = position.xpath;
   return body;
 }
 
-function isPosition(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+/** Title and authors from the progress metadata, used to describe the book to BookOrbit's match-check. */
+export function hintFrom(metadata: unknown): { title: string | null; authors: string | null } | null {
+  if (typeof metadata !== 'object' || metadata === null) return null;
+  const o = metadata as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, HINT_MAX) : null);
+  const hint = { title: str(o.title), authors: str(o.authors) };
+  return hint.title || hint.authors ? hint : null;
 }
 
 function samePercentage(a: unknown, b: number) {
@@ -50,6 +67,31 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
   const clippings = new ClippingService(db, bookorbit, log);
   const bookmarks = new BookmarkService(db, bookorbit, clippings, log);
   const sessions = new SessionService(db, bookorbit, clippings, log);
+  const pending = new PendingStore(db);
+
+  /** Replays uploads that arrived while the book was still unmatched. */
+  async function flush(auth: DeviceAuth, document: string, file: ResolvedFile) {
+    const replayed = await pending.drain<IncomingItem>(auth.user, document, 'clipping', (items) => clippings.apply(file, items))
+      + await pending.drain<IncomingBookmark>(auth.user, document, 'bookmark', (items) => bookmarks.apply(file, items));
+    if (replayed) log.info('pending items replayed', { document, bookFileId: file.bookFileId, items: replayed });
+  }
+
+  /** Pushes a progress write stored while the book was unmatched, dropping it once BookOrbit accepts it. */
+  async function flushProgress(auth: DeviceAuth, document: string) {
+    const row = await db.selectFrom('pending_progress').select(['body']).where('username', '=', auth.user)
+      .where('document', '=', document.toLowerCase()).executeTakeFirst();
+    if (!row) return;
+    const res = await bookorbit.device('/syncs/progress', auth, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: typeof row.body === 'string' ? row.body : JSON.stringify(row.body),
+    });
+    if (res.status === 401) throw new BookOrbitError(401, 'Unauthorized');
+    if (res.ok) {
+      await db.deleteFrom('pending_progress').where('username', '=', auth.user).where('document', '=', document.toLowerCase()).execute();
+      log.info('pending progress replayed', { document });
+    }
+  }
 
   app.use('*', async (c, next) => {
     if (c.req.path === '/healthz') return next();
@@ -61,8 +103,13 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
   });
 
   app.onError((error, c) => {
-    if (error instanceof ProtocolError) return c.json({ code: 2003, message: error.message }, 400);
+    if (error instanceof DocumentError) return c.json({ code: 2004, message: error.message }, 403);
+    if (error instanceof ProtocolError) return c.json({ code: 2003, message: error.message }, 403);
     if (error instanceof BookOrbitError && error.status === 401) return unauthorized(c);
+    if (error instanceof BookOrbitError && error.status === 403) {
+      log.error('BookOrbit refused the request: check the API key has read and write access', { path: c.req.path, error: error.message });
+      return c.json({ code: 2000, message: `BookOrbit refused the request, check the API key access: ${error.message}` }, 502);
+    }
     log.error('request failed', { path: c.req.path, error: error.message });
     return c.json({ code: 2000, message: 'Upstream error' }, 502);
   });
@@ -85,31 +132,54 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     if (!auth) return unauthorized(c);
     const raw = await c.req.json().catch(() => ({}));
     const body = progressBody(raw);
+    const { document, progress, percentage } = body;
+    const hint = hintFrom(body.metadata);
+    if (typeof document === 'string' && DOCUMENT_RE.test(document) && hint) {
+      await db.insertInto('document_hints').values({ username: auth.user, document: document.toLowerCase(), ...hint })
+        .onConflict((oc) => oc.columns(['username', 'document']).doUpdateSet({ ...hint, updated_at: now(db) }))
+        .execute();
+    }
     const res = await bookorbit.device('/syncs/progress', auth, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-    log.info('progress pushed', { document: body.document, percentage: body.percentage, status: res.status });
+    log.info('progress pushed', { document, percentage, status: res.status });
     progressSyncs.inc({ direction: 'push', status: String(res.status) });
-    if (res.ok) {
-      lastSync.setToCurrentTime({ kind: 'progress' });
-      const position = (raw as { position?: unknown }).position;
-      const { document, progress, percentage } = body;
-      if (isPosition(position) && typeof document === 'string' && typeof percentage === 'number') {
-        const row = { progress: String(progress ?? ''), percentage, position };
-        await db.insertInto('positions').values({ username: auth.user, document, ...row })
-          .onConflict((oc) => oc.columns(['username', 'document']).doUpdateSet({ ...row, updated_at: now(db) }))
-          .execute();
-      }
+    // An unmatched book is kept and accepted, as kosync servers do, and replayed once BookOrbit knows it.
+    const unmatched = res.status === 404 && typeof document === 'string' && DOCUMENT_RE.test(document);
+    if (!res.ok && !unmatched) return relay(c, res);
+    lastSync.setToCurrentTime({ kind: 'progress' });
+    const position = parsePosition((raw as { position?: unknown }).position);
+    if (position && typeof document === 'string' && typeof percentage === 'number') {
+      const row = { progress: String(progress ?? ''), percentage, position };
+      await db.insertInto('positions').values({ username: auth.user, document, ...row })
+        .onConflict((oc) => oc.columns(['username', 'document']).doUpdateSet({ ...row, updated_at: now(db) }))
+        .execute();
     }
-    return relay(c, res);
+    if (!unmatched) {
+      if (typeof document === 'string') {
+        await db.deleteFrom('pending_progress').where('username', '=', auth.user).where('document', '=', document.toLowerCase()).execute();
+      }
+      return relay(c, res);
+    }
+    const timestamp = typeof body.timestamp === 'number' ? Math.floor(body.timestamp) : Math.floor(Date.now() / 1000);
+    const stored = { ...body, timestamp };
+    await db.insertInto('pending_progress').values({ username: auth.user, document: document.toLowerCase(), body: stored, timestamp })
+      .onConflict((oc) => oc.columns(['username', 'document']).doUpdateSet({ body: stored, timestamp, updated_at: now(db) }))
+      .execute();
+    // Lists the book in BookOrbit's unmatched books, with the title and authors when known.
+    await bookorbit.resolve(document, auth, hint).catch((error: Error) => log.warn('match-check failed', { document, error: error.message }));
+    log.warn('progress kept for unmatched book', { document });
+    return c.json({ document, timestamp });
   });
 
   app.get('/syncs/progress/:document', async (c) => {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
+    checkDocument(document);
+    await flushProgress(auth, document);
     const res = await bookorbit.device(`/syncs/progress/${encodeURIComponent(document)}`, auth);
     const body = await res.clone().json().catch(() => null) as { percentage?: number; progress?: string; device?: string } | null;
     let restored = false;
@@ -132,9 +202,10 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
-    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    checkDocument(document);
     const { cursor, limit } = parsePageQuery(c.req.query());
     const file = await clippings.resolve(document, auth);
+    if (file && cursor === 0) await flush(auth, document, file);
     const page = await clippings.page(document, file, cursor, limit);
     log.info('clippings pulled', {
       document,
@@ -152,10 +223,15 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
-    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    checkDocument(document);
     const items = decodeBatch(await c.req.json().catch(() => null));
     const file = await clippings.resolve(document, auth);
-    if (!file) return c.json({ code: 2004, message: 'Book not found for the given document hash' }, 404);
+    if (!file) {
+      await pending.put(auth.user, document, 'clipping', items);
+      log.info('clippings kept for unmatched book', { document, items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`) });
+      return c.json({ until: Math.floor(Date.now() / 1000), accepted: items.length });
+    }
+    await flush(auth, document, file);
     await clippings.apply(file, items);
     log.info('clippings pushed', {
       document,
@@ -169,9 +245,10 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
-    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    checkDocument(document);
     const { cursor, limit } = parseBookmarkQuery(c.req.query());
     const file = await clippings.resolve(document, auth);
+    if (file && cursor === 0) await flush(auth, document, file);
     const page = await bookmarks.page(document, file, cursor, limit);
     log.info('bookmarks pulled', {
       document,
@@ -189,10 +266,15 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const auth = deviceAuth(c);
     if (!auth) return unauthorized(c);
     const document = c.req.param('document');
-    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    checkDocument(document);
     const items = decodeBookmarkBatch(await c.req.json().catch(() => null));
     const file = await clippings.resolve(document, auth);
-    if (!file) return c.json({ code: 2004, message: 'Book not found for the given document hash' }, 404);
+    if (!file) {
+      await pending.put(auth.user, document, 'bookmark', items);
+      log.info('bookmarks kept for unmatched book', { document, items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`) });
+      return c.json({ accepted: items.length });
+    }
+    await flush(auth, document, file);
     await bookmarks.apply(file, items);
     log.info('bookmarks pushed', {
       document,

@@ -21,6 +21,7 @@ const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:book
 const SQLITE = DATABASE_URL.startsWith('sqlite:');
 const HASH = '0123456789abcdef0123456789abcdef';
 const LATE = 'fedcba9876543210fedcba9876543210';
+const LATE_SAME = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const AUTH = { 'x-auth-user': 'reader', 'x-auth-key': '5f4dcc3b5aa765d61d8327deb882cf99' };
 const API_KEY = 'bok_test';
 
@@ -52,6 +53,7 @@ class FakeBookOrbit {
           const matches = [];
           if (body.hashes.includes(HASH)) matches.push({ hash: HASH, bookId: 1, bookFileId: 11 });
           if (this.lateKnown && body.hashes.includes(LATE)) matches.push({ hash: LATE, bookId: 2, bookFileId: 22 });
+          if (this.lateKnown && body.hashes.includes(LATE_SAME)) matches.push({ hash: LATE_SAME, bookId: 1, bookFileId: 11 });
           return json(201, { matches });
         }
       }
@@ -166,7 +168,7 @@ describe('bookmark sync', () => {
     expect((await call('GET', `/api/v1/bookmarks/${HASH}?cursor=0&limit=1`, undefined, { 'x-auth-user': 'x', 'x-auth-key': 'y' })).status).toBe(401);
     const probe = await call('GET', `/api/v1/bookmarks/${HASH}?cursor=0&limit=1`);
     expect(probe).toEqual({ status: 200, body: { document: HASH, sync_version: 2, cursor: 0, more: false, items: [] } });
-    expect((await call('GET', `/api/v1/bookmarks/${HASH}?cursor=0&limit=101`)).status).toBe(400);
+    expect((await call('GET', `/api/v1/bookmarks/${HASH}?cursor=0&limit=101`)).status).toBe(403);
   });
 
   it('pushes, renames and deletes device bookmarks', async () => {
@@ -194,8 +196,8 @@ describe('bookmark sync', () => {
   });
 
   it('rejects malformed batches', async () => {
-    expect((await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [{ id: 'nothex', deleted: 0 }] })).status).toBe(400);
-    expect((await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: Array(51).fill({ id: '0123456789abcdef', deleted: 1 }) })).status).toBe(400);
+    expect((await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [{ id: 'nothex', deleted: 0 }] })).status).toBe(403);
+    expect((await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: Array(51).fill({ id: '0123456789abcdef', deleted: 1 }) })).status).toBe(403);
   });
 
   it('mirrors BookOrbit renames, deletions and new bookmarks with device ids', async () => {
@@ -221,6 +223,22 @@ describe('bookmark sync', () => {
   it('returns an empty page for unknown books', async () => {
     const res = await call('GET', '/api/v1/bookmarks/ffffffffffffffffffffffffffffffff?cursor=0&limit=1');
     expect(res.body).toMatchObject({ sync_version: 2, more: false, items: [] });
+  });
+
+  it('accepts bookmarks for an unmatched book and pushes them once it matches', async () => {
+    const b = mark('/body/DocFragment[1]/body/p[1]/text().0', { name: 'Waiting' });
+    expect(await call('PUT', `/api/v1/bookmarks/${LATE_SAME}`, { items: [b] })).toEqual({ status: 200, body: { accepted: 1 } });
+    expect(fake.bookmarks.some((x) => x.title === 'Waiting')).toBe(false);
+    fake.lateKnown = true;
+    try {
+      const page = await call('GET', `/api/v1/bookmarks/${LATE_SAME}?cursor=0&limit=50`);
+      expect(page.body.items.find((i: { id: string }) => i.id === b.id)).toMatchObject({ deleted: 0, name: 'Waiting' });
+      expect(fake.bookmarks.filter((x) => x.title === 'Waiting')).toHaveLength(1);
+      expect(await db.selectFrom('pending_items').selectAll().execute()).toEqual([]);
+    } finally {
+      fake.lateKnown = false;
+      await db.deleteFrom('documents').where('document', 'in', [LATE, LATE_SAME]).execute();
+    }
   });
 });
 
@@ -253,8 +271,8 @@ describe('reading sessions', () => {
   });
 
   it('rejects malformed batches', async () => {
-    expect((await call('PUT', '/api/v1/stats/sessions', { device_id: 'd', items: [{ ...session('x'), document: 'nope' }] })).status).toBe(400);
-    expect((await call('PUT', '/api/v1/stats/sessions', { device_id: 'd', items: Array.from({ length: 21 }, (_, i) => session(`b${i}`)) })).status).toBe(400);
+    expect((await call('PUT', '/api/v1/stats/sessions', { device_id: 'd', items: [{ ...session('x'), document: 'nope' }] })).status).toBe(403);
+    expect((await call('PUT', '/api/v1/stats/sessions', { device_id: 'd', items: Array.from({ length: 21 }, (_, i) => session(`b${i}`)) })).status).toBe(403);
   });
 
   it('records metrics', async () => {

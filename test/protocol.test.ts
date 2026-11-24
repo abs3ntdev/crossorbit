@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { progressBody } from '../src/app.js';
-import { type ClippingRow, decodeBatch, decodeItem, encodeItem, parsePageQuery, ProtocolError } from '../src/protocol.js';
+import { hintFrom, progressBody } from '../src/app.js';
+import { type ClippingRow, decodeBatch, decodeItem, encodeItem, parsePageQuery, parsePosition, ProtocolError } from '../src/protocol.js';
 
 const row: ClippingRow = {
   clipping_id: 'abc123',
@@ -91,6 +91,27 @@ describe('progress body', () => {
 
   it('uses position.xpath when progress is empty', () => {
     expect(progressBody({ document: 'd', progress: '', percentage: 0.1, position: { xpath: '/body/p[2]' } }).progress).toBe('/body/p[2]');
+  });
+
+  it('reads title and authors hints from metadata', () => {
+    expect(hintFrom({ title: ' T ', authors: '', filename: 'x' })).toEqual({ title: 'T', authors: null });
+    expect(hintFrom({ filename: 'x' })).toBeNull();
+    expect(hintFrom(null)).toBeNull();
+  });
+});
+
+describe('rich position', () => {
+  const base = { pctQ: 500000, spine: 1, page: 2, pages: 3 };
+
+  it('keeps known fields only', () => {
+    expect(parsePosition({ ...base, para: 4, li: 1, anchor: 'a', xpath: '/x', junk: true })).toEqual({ ...base, para: 4, li: 1, anchor: 'a', xpath: '/x' });
+  });
+
+  it.each([
+    null, [], { ...base, pctQ: 1_000_001 }, { ...base, spine: -1 }, { ...base, pages: 65536 }, { ...base, page: 1.5 },
+    { ...base, para: 'x' }, { ...base, anchor: 'a'.repeat(49) }, { ...base, xpath: '\u00e9'.repeat(61) }, { pctQ: 1 },
+  ])('rejects %j', (raw) => {
+    expect(parsePosition(raw)).toBeNull();
   });
 });
 

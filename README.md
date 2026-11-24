@@ -7,6 +7,8 @@ Sync bridge between a CrossPoint e-reader (firmware 2.0) and BookOrbit 3.8+. Poi
 - `GET /users/auth`, `PUT /syncs/progress`, `GET /syncs/progress/:document` are forwarded to BookOrbit's KOReader endpoints with the device credentials. The CrossPoint `position` object is stripped, and its `xpath` is used when `progress` is empty.
 - `POST /users/create` answers 403. Create KOReader credentials in BookOrbit settings instead.
 - `GET`/`PUT /api/v1/clippings/:document` speak CrossPoint's clipping protocol (sync version 2). Uploaded clippings become BookOrbit annotations anchored by EPUB CFI. Deleting one on the device deletes the annotation. When the device starts a sync, highlights made in BookOrbit are pulled down as clippings and annotations deleted in BookOrbit become deletions on the device. CrossPoint clippings carry no note or color, so annotations created from them have neither, and BookOrbit stamps them with the server's creation time rather than the device's.
+- `GET`/`PUT /api/v1/bookmarks/:document` speak CrossPoint's bookmark sync (sync version 2, firmware with PR #4531). Device bookmarks become BookOrbit bookmarks: the crengine XPointer is converted to an EPUB CFI (falling back to the start of the chapter when the exact spot cannot be found), and the title is the bookmark name, else its summary, else `Bookmark`. Renaming on the device renames the BookOrbit bookmark and deleting it deletes it. When the device starts a sync, BookOrbit bookmarks are pulled down (their CFI converted to an XPointer, with the id derived from it as the device expects), BookOrbit renames update the device name, and deletions become device deletions.
+- `PUT /api/v1/stats/sessions` receives the device's reading-session log and records each session as a BookOrbit reading session (`crosspoint:<session_id>`, deduplicated by BookOrbit). Every well-formed session is acknowledged at once so the device keeps moving; sessions for books BookOrbit cannot match yet, or whose upload fails, are kept and retried on later uploads.
 - `GET /healthz` checks the database.
 
 ## Web UI
@@ -34,6 +36,7 @@ Device credentials are forwarded per request and never stored. The database (Pos
 1. In BookOrbit, create KOReader sync credentials and an API key.
 2. On the CrossPoint device, set the KOReader sync server to `http://<host>:8080` and enter the BookOrbit KOReader username and password.
 3. Enable clipping sync.
+4. Optionally enable **Sync on sleep** on the device. It runs the same sync when the reader goes to sleep: position is pushed via the existing `/syncs/progress`, and bookmarks and reading sessions go through the endpoints above. Nothing extra is needed on the server.
 
 ## Unraid
 
@@ -60,11 +63,14 @@ scrape_configs:
 | Metric | Meaning |
 |---|---|
 | `crossorbit_dependency_up{dependency}` | `database` (Postgres or SQLite) or `bookorbit` answered the last scrape |
-| `crossorbit_last_sync_timestamp_seconds{kind}` | Last successful `progress` or `clippings` sync |
+| `crossorbit_last_sync_timestamp_seconds{kind}` | Last successful `progress`, `clippings`, `bookmarks` or `sessions` sync |
 | `crossorbit_progress_syncs_total{direction,status}` | Progress pushes and pulls |
 | `crossorbit_clippings_total{direction,kind}` | Clippings created, updated, deleted or skipped, to the device or to BookOrbit |
 | `crossorbit_clippings_unanchored_total{direction}` | Highlights that could not be placed in the EPUB |
 | `crossorbit_clippings_stored{state}` | Stored clippings: `live`, `deleted`, `unanchored` |
+| `crossorbit_bookmarks_total{direction,kind}` | Bookmarks created, renamed, deleted or skipped, to the device or to BookOrbit |
+| `crossorbit_bookmarks_unanchored_total{direction}` | Bookmarks without an exact EPUB position |
+| `crossorbit_reading_sessions_total{outcome}` | Reading sessions `uploaded`, `unresolved` or `failed` (kept for retry) |
 | `crossorbit_documents` | Device documents mapped to BookOrbit books |
 | `crossorbit_epub_loads_total{outcome}` | EPUB downloads from BookOrbit |
 | `crossorbit_http_requests_total`, `crossorbit_http_request_duration_seconds` | Device requests by route |

@@ -39,6 +39,39 @@ export interface Schema {
     updated_at: Generated<Date | string>;
   };
   revision_counter: { id: number; value: string | number };
+  bookmarks: {
+    book_file_id: number;
+    bookmark_id: string;
+    book_id: number;
+    bookorbit_id: number | null;
+    revision: string | number;
+    deleted: Generated<boolean | number>;
+    xpath: Generated<string>;
+    percentage: Generated<number>;
+    summary: Generated<string>;
+    si: Generated<number>;
+    pc: Generated<number>;
+    pp: Generated<number>;
+    name: Generated<string>;
+    vo: string | number | null;
+    title: Generated<string>;
+  };
+  reading_sessions: {
+    session_id: string;
+    device_id: string;
+    username: string;
+    document: string;
+    started_at: string | number;
+    ended_at: string | number;
+    seconds: number;
+    utc_offset_minutes: number;
+    book_file_id: number | null;
+    status: string;
+    attempts: Generated<number>;
+    last_error: string | null;
+    created_at: Generated<Date | string>;
+    uploaded_at: Date | string | null;
+  };
 }
 
 export type Db = Kysely<Schema>;
@@ -152,6 +185,48 @@ const migrations: Record<string, Migration> = {
         await sql`ALTER TABLE clippings ALTER COLUMN revision DROP DEFAULT`.execute(db);
         await sql`DROP SEQUENCE clipping_revision`.execute(db);
       }
+    },
+  },
+  '004_bookmarks_sessions': {
+    async up(db) {
+      const ts = isSqlite(db) ? 'text' : 'timestamptz';
+      await db.schema.createTable('bookmarks')
+        .addColumn('book_file_id', 'integer', (c) => c.notNull())
+        .addColumn('bookmark_id', 'text', (c) => c.notNull())
+        .addColumn('book_id', 'integer', (c) => c.notNull())
+        .addColumn('bookorbit_id', 'integer')
+        .addColumn('revision', 'bigint', (c) => c.notNull())
+        .addColumn('deleted', 'boolean', (c) => c.notNull().defaultTo(false))
+        .addColumn('xpath', 'text', (c) => c.notNull().defaultTo(''))
+        .addColumn('percentage', 'double precision', (c) => c.notNull().defaultTo(0))
+        .addColumn('summary', 'text', (c) => c.notNull().defaultTo(''))
+        .$call((t) => ['si', 'pc', 'pp'].reduce((t, n) => t.addColumn(n, 'integer', (c) => c.notNull().defaultTo(0)), t))
+        .addColumn('name', 'text', (c) => c.notNull().defaultTo(''))
+        .addColumn('vo', 'bigint')
+        .addColumn('title', 'text', (c) => c.notNull().defaultTo(''))
+        .addPrimaryKeyConstraint('bookmarks_pkey', ['book_file_id', 'bookmark_id'])
+        .execute();
+      await db.schema.createIndex('bookmarks_revision').on('bookmarks').columns(['book_file_id', 'revision']).execute();
+      await db.schema.createIndex('bookmarks_bookorbit').on('bookmarks').columns(['book_file_id', 'bookorbit_id']).unique()
+        .where(sql.ref('bookorbit_id'), 'is not', null).execute();
+      await db.schema.createTable('reading_sessions')
+        .addColumn('session_id', 'text', (c) => c.notNull())
+        .addColumn('device_id', 'text', (c) => c.notNull())
+        .addColumn('username', 'text', (c) => c.notNull())
+        .addColumn('document', 'text', (c) => c.notNull())
+        .addColumn('started_at', 'bigint', (c) => c.notNull())
+        .addColumn('ended_at', 'bigint', (c) => c.notNull())
+        .addColumn('seconds', 'integer', (c) => c.notNull())
+        .addColumn('utc_offset_minutes', 'integer', (c) => c.notNull().defaultTo(0))
+        .addColumn('book_file_id', 'integer')
+        .addColumn('status', 'text', (c) => c.notNull())
+        .addColumn('attempts', 'integer', (c) => c.notNull().defaultTo(0))
+        .addColumn('last_error', 'text')
+        .addColumn('created_at', ts, (c) => c.notNull().defaultTo(now(db)))
+        .addColumn('uploaded_at', ts)
+        .addPrimaryKeyConstraint('reading_sessions_pkey', ['username', 'session_id'])
+        .execute();
+      await db.schema.createIndex('reading_sessions_status').on('reading_sessions').columns(['username', 'status']).execute();
     },
   },
 };

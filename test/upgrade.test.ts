@@ -38,7 +38,7 @@ describe.skipIf(DATABASE_URL.startsWith('sqlite:'))('upgrade from the legacy Pos
     await migrate(db);
     await migrate(db);
     const names = await db.selectFrom('kysely_migration' as never).select('name' as never).orderBy('name' as never).execute();
-    expect(names.map((r) => (r as { name: string }).name)).toEqual(['001_init', '002_positions', '003_revision_counter']);
+    expect(names.map((r) => (r as { name: string }).name)).toEqual(['001_init', '002_positions', '003_revision_counter', '004_bookmarks_sessions']);
     const rows = await db.selectFrom('clippings').select(['clipping_id', 'revision']).orderBy('revision').execute();
     expect(rows.map((r) => [r.clipping_id, Number(r.revision)])).toEqual([['a', 1], ['b', 2]]);
     expect(await db.selectFrom('positions').select('position').executeTakeFirst()).toEqual({ position: { page: 3 } });

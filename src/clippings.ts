@@ -217,7 +217,7 @@ export class ClippingService {
     }
   }
 
-  private book(fileId: number): Promise<EpubBook | null> {
+  book(fileId: number): Promise<EpubBook | null> {
     let entry = this.books.get(fileId);
     if (!entry) {
       entry = this.bookorbit

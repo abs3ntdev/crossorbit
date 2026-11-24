@@ -2,7 +2,9 @@ import { Hono, type Context } from 'hono';
 import { sql } from 'kysely';
 
 import { BookOrbit, BookOrbitError, type DeviceAuth } from './bookorbit.js';
+import { BookmarkService, decodeBookmarkBatch, parseBookmarkQuery } from './bookmarks.js';
 import { ClippingService } from './clippings.js';
+import { decodeSessionBatch, SessionService } from './sessions.js';
 import { type Db, now } from './db.js';
 import type { Logger } from './log.js';
 import { httpDuration, httpRequests, lastSync, progressSyncs } from './metrics.js';
@@ -46,6 +48,8 @@ function samePercentage(a: unknown, b: number) {
 export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
   const app = new Hono();
   const clippings = new ClippingService(db, bookorbit, log);
+  const bookmarks = new BookmarkService(db, bookorbit, clippings, log);
+  const sessions = new SessionService(db, bookorbit, clippings, log);
 
   app.use('*', async (c, next) => {
     if (c.req.path === '/healthz') return next();
@@ -159,6 +163,53 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
       items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`),
     });
     return c.json({ until: Math.floor(Date.now() / 1000), accepted: items.length });
+  });
+
+  app.get('/api/v1/bookmarks/:document', async (c) => {
+    const auth = deviceAuth(c);
+    if (!auth) return unauthorized(c);
+    const document = c.req.param('document');
+    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    const { cursor, limit } = parseBookmarkQuery(c.req.query());
+    const file = await clippings.resolve(document, auth);
+    const page = await bookmarks.page(document, file, cursor, limit);
+    log.info('bookmarks pulled', {
+      document,
+      bookFileId: file?.bookFileId ?? null,
+      cursor,
+      next: page.cursor,
+      more: page.more,
+      items: page.items.map((item) => `${(item as { id: string }).id}${(item as { deleted: number }).deleted ? ':deleted' : ''}`),
+    });
+    lastSync.setToCurrentTime({ kind: 'bookmarks' });
+    return c.json(page);
+  });
+
+  app.put('/api/v1/bookmarks/:document', async (c) => {
+    const auth = deviceAuth(c);
+    if (!auth) return unauthorized(c);
+    const document = c.req.param('document');
+    if (!DOCUMENT_RE.test(document)) throw new ProtocolError('Invalid document');
+    const items = decodeBookmarkBatch(await c.req.json().catch(() => null));
+    const file = await clippings.resolve(document, auth);
+    if (!file) return c.json({ code: 2004, message: 'Book not found for the given document hash' }, 404);
+    await bookmarks.apply(file, items);
+    log.info('bookmarks pushed', {
+      document,
+      bookFileId: file.bookFileId,
+      items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`),
+    });
+    return c.json({ accepted: items.length });
+  });
+
+  app.put('/api/v1/stats/sessions', async (c) => {
+    const auth = deviceAuth(c);
+    if (!auth) return unauthorized(c);
+    const batch = decodeSessionBatch(await c.req.json().catch(() => null));
+    const accepted = await sessions.upload(auth, batch);
+    log.info('reading sessions received', { deviceId: batch.device_id ?? null, sessions: accepted });
+    lastSync.setToCurrentTime({ kind: 'sessions' });
+    return c.json({ accepted_session_ids: accepted });
   });
 
   return app;

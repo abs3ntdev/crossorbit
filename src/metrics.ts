@@ -58,6 +58,27 @@ export const clippingsUnanchored = new Counter({
   registers: [registry],
 });
 
+export const bookmarksTransferred = new Counter({
+  name: 'crossorbit_bookmarks_total',
+  help: 'Bookmarks moved between the device and BookOrbit',
+  labelNames: ['direction', 'kind'] as const,
+  registers: [registry],
+});
+
+export const bookmarksUnanchored = new Counter({
+  name: 'crossorbit_bookmarks_unanchored_total',
+  help: 'Bookmarks that could not be placed exactly in the EPUB',
+  labelNames: ['direction'] as const,
+  registers: [registry],
+});
+
+export const readingSessions = new Counter({
+  name: 'crossorbit_reading_sessions_total',
+  help: 'Reading sessions received from devices by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 export const epubLoads = new Counter({
   name: 'crossorbit_epub_loads_total',
   help: 'EPUB downloads from BookOrbit by outcome',
@@ -112,6 +133,9 @@ export function operationOf(path: string): string {
   if (path.startsWith('/api/v1/koreader/syncs/progress')) return 'progress_push';
   if (/\/books\/\d+\/annotations\/\d+/.test(path)) return 'annotation_item';
   if (/\/books\/\d+\/annotations/.test(path)) return 'annotations';
+  if (/\/books\/\d+\/bookmarks\/\d+/.test(path)) return 'bookmark_item';
+  if (/\/books\/\d+\/bookmarks/.test(path)) return 'bookmarks';
+  if (/\/books\/files\/\d+\/sessions/.test(path)) return 'reading_session';
   if (path.includes('/serve')) return 'epub_download';
   if (/\/books\/\d+\/thumbnail$/.test(path)) return 'cover';
   if (/\/books\/\d+$/.test(path)) return 'book';

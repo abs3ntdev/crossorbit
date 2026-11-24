@@ -80,6 +80,7 @@ interface Health {
   bookorbit: boolean;
   progress: Date | string | null;
   clippings: Date | string | null;
+  bookmarks: Date | string | null;
 }
 
 function HealthStrip({ health }: { health: Health }) {
@@ -95,6 +96,7 @@ function HealthStrip({ health }: { health: Health }) {
       {dot(health.bookorbit, 'BookOrbit')}
       <span>Progress sync <Time value={health.progress} /></span>
       <span>Highlight sync <Time value={health.clippings} /></span>
+      <span>Bookmark sync <Time value={health.bookmarks} /></span>
     </div>
   );
 }
@@ -139,14 +141,16 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
       const v = gauge.values.find((x) => x.labels.kind === kind)?.value;
       return v ? new Date(v * 1000) : null;
     };
-    return { database, bookorbit: up, progress: at('progress') ?? (latest?.t as Date | string | null) ?? null, clippings: at('clippings') };
+    return { database, bookorbit: up, progress: at('progress') ?? (latest?.t as Date | string | null) ?? null, clippings: at('clippings'), bookmarks: at('bookmarks') };
   }
 
   async function books() {
-    const [documents, positions, counts] = await Promise.all([
+    const [documents, positions, counts, marks] = await Promise.all([
       db.selectFrom('documents').selectAll().orderBy('resolved_at', 'desc').execute(),
       db.selectFrom('positions').selectAll().orderBy('updated_at', 'desc').execute(),
       db.selectFrom('clippings').select(['book_file_id', 'clipping_id', 'annotation_id', 'deleted']).execute(),
+      db.selectFrom('bookmarks').select(['book_file_id', (eb) => eb.fn.countAll().as('n')]).where('deleted', '=', false)
+        .groupBy('book_file_id').execute(),
     ]);
     const files = new Map<number, { bookId: number; bookFileId: number; documents: string[]; resolvedAt: Date | string }>();
     for (const d of documents) {
@@ -158,7 +162,8 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
       const position = positions.find((p) => f.documents.includes(p.document));
       const tally = { synced: 0, unanchored: 0, deleted: 0 };
       for (const c of counts) if (c.book_file_id === f.bookFileId) tally[statusOf(c as Clip)]++;
-      return { ...f, position, tally, meta: await meta(f.bookId) };
+      const bookmarks = Number(marks.find((m) => m.book_file_id === f.bookFileId)?.n ?? 0);
+      return { ...f, position, tally, bookmarks, meta: await meta(f.bookId) };
     }));
   }
 
@@ -191,6 +196,7 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
                         <span class="synced">{b.tally.synced} synced</span>
                         <span class="unanchored">{b.tally.unanchored} unanchored</span>
                         <span class="deleted">{b.tally.deleted} deleted</span>
+                        <span>{b.bookmarks} bookmarks</span>
                       </p>
                     </div>
                   </a>

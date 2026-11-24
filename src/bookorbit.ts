@@ -15,6 +15,13 @@ export interface Annotation {
   highlightedAt?: string;
 }
 
+export interface Bookmark {
+  id: number;
+  bookId: number;
+  cfi: string | null;
+  title: string;
+}
+
 export interface BookMeta {
   title: string | null;
   authors: string[];
@@ -118,6 +125,33 @@ export class BookOrbit {
 
   async deleteAnnotation(bookId: number, annotationId: number): Promise<void> {
     await this.api(`/books/${bookId}/annotations/${annotationId}`, { method: 'DELETE' });
+  }
+
+  async listBookmarks(bookId: number, bookFileId: number): Promise<Bookmark[]> {
+    const res = await this.api(`/books/${bookId}/bookmarks?readerFileId=${bookFileId}`);
+    if (res.status === 404) return [];
+    const body = (await res.json()) as Bookmark[] | { items: Bookmark[] };
+    return Array.isArray(body) ? body : body.items;
+  }
+
+  async createBookmark(bookId: number, body: { bookFileId: number; cfi: string; title: string }): Promise<Bookmark> {
+    const res = await this.api(`/books/${bookId}/bookmarks`, { method: 'POST', body: JSON.stringify(body) });
+    if (res.status === 404) throw new BookOrbitError(404, 'Book not found');
+    return (await res.json()) as Bookmark;
+  }
+
+  async updateBookmark(bookId: number, bookmarkId: number, body: { title: string }): Promise<void> {
+    await this.api(`/books/${bookId}/bookmarks/${bookmarkId}`, { method: 'PATCH', body: JSON.stringify(body) });
+  }
+
+  async deleteBookmark(bookId: number, bookmarkId: number): Promise<void> {
+    await this.api(`/books/${bookId}/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+  }
+
+  /** Uploads a reading session. BookOrbit dedupes on sessionId so retries are safe. */
+  async saveSession(fileId: number, body: { sessionId: string; startedAt: string; endedAt: string; durationSeconds: number }): Promise<void> {
+    const res = await this.api(`/books/files/${fileId}/sessions`, { method: 'POST', body: JSON.stringify(body) });
+    if (res.status === 404) throw new BookOrbitError(404, 'Book file not found');
   }
 
   async downloadFile(fileId: number): Promise<Uint8Array> {

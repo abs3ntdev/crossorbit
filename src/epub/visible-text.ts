@@ -1,10 +1,10 @@
-import { type CfiNode, getDocumentElement, isElementNode, isTextNode, type RangePoint } from './cfi.js';
+import { type DomNode, getDocumentElement, isElementNode, isTextNode, type RangePoint } from './dom.js';
 
 // Mirrors CrossPoint's VisibleTextUtils::isNonVisibleElement.
 const NON_VISIBLE = new Set(['head', 'style', 'script', 'title', 'rp']);
 
 interface VisibleTextNode {
-  node: CfiNode;
+  node: DomNode;
   start: number;
   length: number;
 }
@@ -14,11 +14,11 @@ export class VisibleTextMap {
   private readonly nodes: VisibleTextNode[] = [];
   readonly length: number;
 
-  constructor(root: CfiNode) {
+  constructor(root: DomNode) {
     const documentElement = getDocumentElement(root);
     const body = (documentElement?.children ?? []).find((child) => isElementNode(child) && child.name?.toLowerCase() === 'body');
     let total = 0;
-    const walk = (node: CfiNode) => {
+    const walk = (node: DomNode) => {
       for (const child of node.children ?? []) {
         if (isTextNode(child)) {
           const length = Array.from(child.data ?? '').length;
@@ -45,7 +45,7 @@ export class VisibleTextMap {
     return { node: entry.node, offset: prefix.length };
   }
 
-  offsetOf(node: CfiNode, utf16Offset: number): number | null {
+  offsetOf(node: DomNode, utf16Offset: number): number | null {
     const entry = this.nodes.find((n) => n.node === node);
     if (!entry) return null;
     return entry.start + Array.from((entry.node.data ?? '').slice(0, utf16Offset)).length;

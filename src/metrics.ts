@@ -131,10 +131,10 @@ export function operationOf(path: string): string {
   if (path.startsWith('/api/v1/koreader/users/auth')) return 'device_auth';
   if (path.startsWith('/api/v1/koreader/syncs/progress/')) return 'progress_pull';
   if (path.startsWith('/api/v1/koreader/syncs/progress')) return 'progress_push';
-  if (/\/books\/\d+\/annotations\/\d+/.test(path)) return 'annotation_item';
-  if (/\/books\/\d+\/annotations/.test(path)) return 'annotations';
-  if (/\/books\/\d+\/bookmarks\/\d+/.test(path)) return 'bookmark_item';
-  if (/\/books\/\d+\/bookmarks/.test(path)) return 'bookmarks';
+  if (path.startsWith('/api/v1/koreader/plugin/annotations/exchange-ack')) return 'annotation_ack';
+  if (path.startsWith('/api/v1/koreader/plugin/annotations/exchange')) return 'annotation_exchange';
+  if (path.startsWith('/api/v1/koreader/plugin/bookmarks/exchange-ack')) return 'bookmark_ack';
+  if (path.startsWith('/api/v1/koreader/plugin/bookmarks/exchange')) return 'bookmark_exchange';
   if (/\/books\/files\/\d+\/sessions/.test(path)) return 'reading_session';
   if (path.includes('/serve')) return 'epub_download';
   if (/\/books\/\d+\/thumbnail$/.test(path)) return 'cover';

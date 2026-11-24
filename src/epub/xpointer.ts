@@ -1,12 +1,10 @@
-// crengine XPointer <-> EPUB CFI point conversion, ported from BookOrbit's xpointer.utils.ts.
+// crengine XPointers <-> device clipping offsets, after BookOrbit's xpointer.utils.ts.
 // XPointers look like /body/DocFragment[N]/body/div/p[2]/text()[1].14 where element steps are
 // 1-based among same-name siblings and offsets count Unicode code points.
 
 import type { EpubBook } from './book.js';
-import {
-  type CfiNode, cfiFromPoint, chapterIndexFromSpineStep, getDocumentElement, isElementNode, isTextNode, joinCfiIndirection,
-  parseCfi, resolveCfiParts, spineCfiForChapterIndex,
-} from './cfi.js';
+import { type DomNode, getDocumentElement, isElementNode, isTextNode } from './dom.js';
+import { collapse, VisibleTextMap } from './visible-text.js';
 
 interface ParsedXPointer {
   spine: number;
@@ -49,10 +47,10 @@ export function parseXPointer(raw: string): ParsedXPointer | null {
   return { spine: fragment - 1, steps, textIndex, offset };
 }
 
-const elementChildren = (node: CfiNode, name?: string) =>
+const elementChildren = (node: DomNode, name?: string) =>
   (node.children ?? []).filter((c) => isElementNode(c) && (name == null || (c.name ?? '').toLowerCase() === name));
 
-const textChildren = (node: CfiNode) => (node.children ?? []).filter((c) => isTextNode(c));
+const textChildren = (node: DomNode) => (node.children ?? []).filter((c) => isTextNode(c));
 
 function codePointsToUtf16(text: string, points: number): number {
   let units = 0;
@@ -65,38 +63,9 @@ function codePointsToUtf16(text: string, points: number): number {
   return units;
 }
 
-/** Converts a device XPointer to a CFI point. Returns null when the chapter is unknown. */
-export function xpointerToCfi(book: EpubBook, xpath: string): { cfi: string; exact: boolean } | null {
-  const parsed = parseXPointer(xpath);
-  if (!parsed) return null;
-  const root = book.chapter(parsed.spine);
-  if (!root) return null;
-  const spineCfi = spineCfiForChapterIndex(parsed.spine);
-  const fallback = { cfi: spineCfi, exact: false };
-  let current = getDocumentElement(root);
-  for (const step of parsed.steps) {
-    current = current ? (elementChildren(current, step.name)[step.index - 1] ?? null) : null;
-  }
-  if (!current || current.type === 'root') return fallback;
-  let node: CfiNode = current;
-  let offset: number | null = null;
-  if (parsed.textIndex != null) {
-    const text = textChildren(current)[parsed.textIndex - 1];
-    if (text) {
-      node = text;
-      offset = codePointsToUtf16(text.data ?? '', parsed.offset ?? 0);
-    }
-  }
-  try {
-    return { cfi: joinCfiIndirection(spineCfi, cfiFromPoint({ node, offset: offset ?? 0 })), exact: true };
-  } catch {
-    return fallback;
-  }
-}
-
-function elementPath(element: CfiNode, documentElement: CfiNode): string | null {
+function elementPath(element: DomNode, documentElement: DomNode): string | null {
   const segments: string[] = [];
-  let current: CfiNode | null | undefined = element;
+  let current: DomNode | null | undefined = element;
   while (current && current !== documentElement) {
     if (!isElementNode(current) || !current.parent) return null;
     const name = (current.name ?? '').toLowerCase();
@@ -109,30 +78,85 @@ function elementPath(element: CfiNode, documentElement: CfiNode): string | null 
   return current === documentElement ? segments.join('/') : null;
 }
 
-/** Converts a CFI to a device XPointer pointing at the start of the CFI. */
-export function cfiToXPointer(book: EpubBook, cfi: string): { xpath: string; spine: number } | null {
-  const parsed = parseCfi(cfi);
-  const spine = chapterIndexFromSpineStep(parsed?.spineStep ?? null);
-  if (!parsed || spine == null) return null;
-  const root = book.chapter(spine);
+/** XPointer for a text node point, offset in code points as crengine counts them. */
+function textXPointer(spine: number, documentElement: DomNode, node: DomNode, utf16: number): string | null {
+  const parent = node.parent;
+  if (!parent) return null;
+  const path = elementPath(parent, documentElement);
+  if (!path) return null;
+  const texts = textChildren(parent);
+  const index = texts.indexOf(node) + 1;
+  if (index === 0) return null;
+  const step = texts.length > 1 ? `text()[${index}]` : 'text()';
+  return `/body/DocFragment[${spine + 1}]/${path}/${step}.${Array.from((node.data ?? '').slice(0, utf16)).length}`;
+}
+
+/** Text node and UTF-16 offset an XPointer names inside `root`, or null when it does not land in text. */
+function resolveTextPoint(root: DomNode, spine: number, xpath: string): { node: DomNode; utf16: number } | null {
+  const parsed = parseXPointer(xpath);
+  if (!parsed || parsed.textIndex == null || parsed.spine !== spine) return null;
+  let current = getDocumentElement(root);
+  for (const step of parsed.steps) current = current ? (elementChildren(current, step.name)[step.index - 1] ?? null) : null;
+  const node = current ? textChildren(current)[parsed.textIndex - 1] : undefined;
+  if (!node) return null;
+  return { node, utf16: codePointsToUtf16(node.data ?? '', parsed.offset ?? 0) };
+}
+
+export interface XPointerRange {
+  pos0: string;
+  pos1: string;
+}
+
+/**
+ * KOReader range (pos0 start, pos1 exclusive end) for a CrossPoint clipping. The offsets are used
+ * when they hold the quote, else a unique occurrence of the quote in the chapter.
+ */
+export function clippingToXPointers(
+  book: EpubBook,
+  clip: { spine: number; text: string; startOffset: number | null; endOffset: number | null },
+): XPointerRange | null {
+  const root = book.chapter(clip.spine);
   const documentElement = root ? getDocumentElement(root) : null;
   if (!root || !documentElement) return null;
-  const base = `/body/DocFragment[${spine + 1}]`;
-  const body = elementChildren(documentElement, 'body')[0];
-  if (!parsed.start.length) return body ? { xpath: `${base}/body`, spine } : null;
-  const point = resolveCfiParts(root, parsed.start);
-  if (!point?.node) return null;
-  if (isTextNode(point.node) && point.node.parent) {
-    const parent = point.node.parent;
-    const path = elementPath(parent, documentElement);
-    if (!path) return null;
-    const texts = textChildren(parent);
-    const index = texts.indexOf(point.node) + 1;
-    const units = (point.node.data ?? '').slice(0, point.offset ?? 0);
-    const step = texts.length > 1 ? `text()[${index}]` : 'text()';
-    return { xpath: `${base}/${path}/${step}.${Array.from(units).length}`, spine };
+  const map = new VisibleTextMap(root);
+  let range: { start: number; end: number } | null = null;
+  if (clip.startOffset != null && clip.endOffset != null && clip.endOffset <= map.length && clip.endOffset > clip.startOffset) {
+    if (collapse(map.text(clip.startOffset, clip.endOffset)) === collapse(clip.text)) range = { start: clip.startOffset, end: clip.endOffset };
   }
-  const element = point.node === documentElement ? body : point.node;
-  const path = element ? elementPath(element, documentElement) : null;
-  return path ? { xpath: `${base}/${path}`, spine } : null;
+  range ??= map.find(clip.text);
+  if (!range) return null;
+  const from = map.pointAt(range.start, false);
+  const to = map.pointAt(range.end, true);
+  if (!from || !to) return null;
+  const pos0 = textXPointer(clip.spine, documentElement, from.node, from.offset);
+  const pos1 = textXPointer(clip.spine, documentElement, to.node, to.offset);
+  return pos0 && pos1 ? { pos0, pos1 } : null;
+}
+
+/**
+ * CrossPoint chapter offsets for a KOReader range. The quote decides: when the range does not
+ * hold it, a unique occurrence of the quote in the chapter is used instead.
+ */
+export function xpointersToOffsets(
+  book: EpubBook,
+  range: { pos0: string; pos1: string | null },
+  text: string | null,
+): { spine: number; start: number; end: number; text: string } | null {
+  const spine = parseXPointer(range.pos0)?.spine;
+  if (spine == null) return null;
+  const root = book.chapter(spine);
+  if (!root) return null;
+  const map = new VisibleTextMap(root);
+  const a = resolveTextPoint(root, spine, range.pos0);
+  const b = range.pos1 ? resolveTextPoint(root, spine, range.pos1) : null;
+  if (a && b) {
+    const start = map.offsetOf(a.node, a.utf16);
+    const end = map.offsetOf(b.node, b.utf16);
+    if (start != null && end != null && end > start) {
+      const found = map.text(start, end);
+      if (!text || collapse(found) === collapse(text)) return { spine, start, end, text: text ?? found.trim() };
+    }
+  }
+  const hit = text ? map.find(text) : null;
+  return hit ? { spine, start: hit.start, end: hit.end, text: text! } : null;
 }

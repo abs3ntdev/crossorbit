@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
-import { type BookOrbit, type Bookmark } from './bookorbit.js';
-import type { ClippingService, ResolvedFile } from './clippings.js';
+import type { BookOrbit, DeviceAuth } from './bookorbit.js';
+import { type ClippingService, refusal, type ResolvedFile } from './clippings.js';
 import { type Db, nextRevision } from './db.js';
-import { spineCfiForChapterIndex } from './epub/cfi.js';
-import { cfiToXPointer, parseXPointer, xpointerToCfi } from './epub/xpointer.js';
+import { parseXPointer } from './epub/xpointer.js';
+import {
+  type AckDeleted, BOOKMARK_MAX_KEYS, type BookmarkAckApplied, type BookmarkAddEntry, EXCHANGE_MAX_CHANGES, type ExchangeKey, type KoBookmark,
+  koDatetime, type KoDeleteEntry, koKey, MAX_ROUNDS,
+} from './exchange.js';
 import type { Logger } from './log.js';
 import { bookmarksTransferred, bookmarksUnanchored } from './metrics.js';
 import { PAGE_MAX, ProtocolError, SYNC_VERSION, truncateUtf8 } from './protocol.js';
@@ -122,9 +125,15 @@ export function parseBookmarkQuery(query: Record<string, string | undefined>) {
 export const titleFor = (item: { name: string; summary: string }) =>
   (item.name.trim() || item.summary.trim() || 'Bookmark').slice(0, TITLE_MAX);
 
-export class BookmarkService {
-  private readonly locks = new Map<string, Promise<void>>();
+const nowSeconds = () => Math.floor(Date.now() / 1000);
 
+type StoredBookmark = Awaited<ReturnType<BookmarkService['rows']>>[number];
+
+/**
+ * Device bookmarks are BookOrbit dogears, exchanged through its KOReader bookmark exchange keyed by
+ * md5(datetime|pos). The local table is the device's revision log.
+ */
+export class BookmarkService {
   constructor(
     private readonly db: Db,
     private readonly bookorbit: BookOrbit,
@@ -135,7 +144,6 @@ export class BookmarkService {
   async page(document: string, file: ResolvedFile | null, cursor: number, limit: number) {
     const empty = { document, sync_version: SYNC_VERSION, cursor, more: false, items: [] as unknown[] };
     if (!file) return empty;
-    if (cursor === 0) await this.locked(`mirror:${file.bookFileId}`, () => this.mirror(file));
     const rows = await this.db.selectFrom('bookmarks').selectAll()
       .where('book_file_id', '=', file.bookFileId).where('revision', '>', cursor)
       .orderBy('revision').limit(limit + 1).execute() as BookmarkRow[];
@@ -144,60 +152,46 @@ export class BookmarkService {
     return { ...empty, cursor: page.length ? Number(page[page.length - 1].revision) : cursor, more, items: page.map(encodeBookmark) };
   }
 
+  rows(bookFileId: number) {
+    return this.db.selectFrom('bookmarks').selectAll().where('book_file_id', '=', bookFileId).execute();
+  }
+
+  /** Stores device uploads in the revision log, marking them for the next exchange. */
   async apply(file: ResolvedFile, items: IncomingBookmark[]): Promise<void> {
     for (const item of items) {
-      await this.locked(`${file.bookFileId}:${item.id}`, () =>
-        item.deleted ? this.applyDeletion(file, item.id) : this.applyLive(file, item));
+      await this.clippings.locked(`bookmark:${file.bookFileId}:${item.id}`, () =>
+        (item.deleted ? this.storeDeletion(file, item.id) : this.storeLive(file, item)));
     }
   }
 
-  private async locked(key: string, fn: () => Promise<void>): Promise<void> {
-    const prev = this.locks.get(key) ?? Promise.resolve();
-    const run = prev.then(fn, fn);
-    const tail = run.catch(() => {});
-    this.locks.set(key, tail);
-    try {
-      await run;
-    } finally {
-      if (this.locks.get(key) === tail) this.locks.delete(key);
-    }
-  }
-
-  private async applyDeletion(file: ResolvedFile, id: string): Promise<void> {
-    const existing = await this.db.selectFrom('bookmarks').select(['bookorbit_id', 'deleted'])
+  private async storeDeletion(file: ResolvedFile, id: string): Promise<void> {
+    const existing = await this.db.selectFrom('bookmarks').select(['deleted'])
       .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', id).executeTakeFirst();
     if (existing?.deleted) return;
-    if (existing?.bookorbit_id != null) await this.bookorbit.deleteBookmark(file.bookId, existing.bookorbit_id);
     bookmarksTransferred.inc({ direction: 'to_bookorbit', kind: 'deleted' });
     await this.db.transaction().execute(async (tx) => {
       const revision = await nextRevision(tx);
-      const tombstone = { deleted: true, bookorbit_id: null, xpath: '', summary: '', name: '', title: '', vo: null, revision };
+      const tombstone = { deleted: true, xpath: '', summary: '', name: '', title: '', vo: null, ko_dirty: false, revision };
       await tx.insertInto('bookmarks').values({ book_file_id: file.bookFileId, bookmark_id: id, book_id: file.bookId, ...tombstone })
         .onConflict((oc) => oc.columns(['book_file_id', 'bookmark_id']).doUpdateSet(tombstone))
         .execute();
     });
   }
 
-  private async applyLive(file: ResolvedFile, item: LiveBookmark): Promise<void> {
+  private async storeLive(file: ResolvedFile, item: LiveBookmark): Promise<void> {
     const existing = await this.db.selectFrom('bookmarks').selectAll()
       .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', item.id).executeTakeFirst();
     const title = titleFor(item);
-    let bookorbitId = existing && !existing.deleted ? existing.bookorbit_id : null;
-    if (bookorbitId == null) {
-      bookorbitId = await this.createBookmark(file, item, title);
-      bookmarksTransferred.inc({ direction: 'to_bookorbit', kind: 'created' });
-    } else if (existing!.title !== title) {
-      await this.bookorbit.updateBookmark(file.bookId, bookorbitId, { title });
-      bookmarksTransferred.inc({ direction: 'to_bookorbit', kind: 'renamed' });
-    }
-    const unchanged = existing && !existing.deleted && existing.bookorbit_id === bookorbitId && existing.title === title
+    const unchanged = existing && !existing.deleted && existing.title === title
       && existing.xpath === item.xpath && existing.name === item.name && existing.summary === item.summary
       && Math.abs(existing.percentage - item.percentage) < 1e-6 && existing.si === item.si && existing.pc === item.pc
       && existing.pp === item.pp && (existing.vo == null ? null : Number(existing.vo)) === item.vo;
     if (unchanged) return;
+    const fresh = !existing || existing.deleted || existing.xpath !== item.xpath;
+    const renamed = !fresh && existing!.title !== title;
+    bookmarksTransferred.inc({ direction: 'to_bookorbit', kind: fresh ? 'created' : renamed ? 'renamed' : 'updated' });
     const fields = {
       book_id: file.bookId,
-      bookorbit_id: bookorbitId,
       deleted: false,
       xpath: item.xpath,
       percentage: item.percentage,
@@ -208,6 +202,8 @@ export class BookmarkService {
       name: item.name,
       vo: item.vo,
       title,
+      ...(fresh ? { ko_datetime: null, ko_key: null, bookorbit_id: null } : {}),
+      ...(fresh || renamed ? { ko_dirty: true } : {}),
     };
     await this.db.transaction().execute(async (tx) => {
       const revision = await nextRevision(tx);
@@ -217,97 +213,129 @@ export class BookmarkService {
     });
   }
 
-  private async createBookmark(file: ResolvedFile, item: LiveBookmark, title: string): Promise<number> {
-    const book = await this.clippings.book(file.bookFileId);
-    const converted = book ? xpointerToCfi(book, item.xpath) : null;
-    // Without an exact anchor the bookmark still lands at the start of its chapter.
-    const cfi = converted?.cfi ?? spineCfiForChapterIndex(parseXPointer(item.xpath)?.spine ?? item.si);
-    if (!converted?.exact) {
-      bookmarksUnanchored.inc({ direction: 'to_bookorbit' });
-      this.log.warn('bookmark not anchored exactly', { bookFileId: file.bookFileId, bookmarkId: item.id, cfi });
-    }
-    const created = await this.bookorbit.createBookmark(file.bookId, { bookFileId: file.bookFileId, cfi, title });
-    return created.id;
+  /** Runs BookOrbit's bookmark exchange for one book and applies what it returns. */
+  exchange(file: ResolvedFile, auth: DeviceAuth): Promise<void> {
+    return this.clippings.locked(`bookmark-exchange:${file.bookFileId}`, () => this.runExchange(file, auth));
   }
 
-  private async mirror(file: ResolvedFile): Promise<void> {
-    const remote = await this.bookorbit.listBookmarks(file.bookId, file.bookFileId);
-    const byId = new Map(remote.map((b) => [b.id, b]));
-    const mapped = await this.db.selectFrom('bookmarks').select(['bookmark_id', 'bookorbit_id', 'deleted', 'title'])
-      .where('book_file_id', '=', file.bookFileId).where('bookorbit_id', 'is not', null)
-      .$narrowType<{ bookorbit_id: number }>().execute();
-    const known = new Set(mapped.map((m) => m.bookorbit_id));
+  private async runExchange(file: ResolvedFile, auth: DeviceAuth): Promise<void> {
+    await this.identify(file);
+    const rows = await this.rows(file.bookFileId);
+    const live = rows.filter((r) => !r.deleted && r.ko_key && r.ko_datetime);
+    const keys: ExchangeKey[] = live.map((r) => ({ k: r.ko_key!, dt: r.ko_datetime! }));
+    const keysComplete = keys.length <= BOOKMARK_MAX_KEYS;
+    const changes = live.filter((r) => r.ko_dirty);
 
-    const orphaned = mapped.filter((m) => !m.deleted && !byId.has(m.bookorbit_id));
-    const renamed = mapped.filter((m) => !m.deleted && byId.has(m.bookorbit_id) && byId.get(m.bookorbit_id)!.title !== m.title);
-    if (orphaned.length) bookmarksTransferred.inc({ direction: 'to_device', kind: 'deleted' }, orphaned.length);
-    if (renamed.length) bookmarksTransferred.inc({ direction: 'to_device', kind: 'renamed' }, renamed.length);
-    if (orphaned.length || renamed.length) {
-      await this.db.transaction().execute(async (tx) => {
-        for (const { bookmark_id } of orphaned) {
-          await tx.updateTable('bookmarks')
-            .set({ deleted: true, bookorbit_id: null, xpath: '', summary: '', name: '', title: '', vo: null, revision: await nextRevision(tx) })
-            .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', bookmark_id).execute();
-        }
-        for (const { bookmark_id, bookorbit_id } of renamed) {
-          const title = byId.get(bookorbit_id)!.title;
-          await tx.updateTable('bookmarks')
-            .set({ title, name: truncateUtf8(title, NAME_MAX), revision: await nextRevision(tx) })
-            .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', bookmark_id).execute();
-        }
+    let outcome: Awaited<ReturnType<BookOrbit['exchangeBookmarks']>> | null = null;
+    let first = true;
+    for (let i = 0; first || i < changes.length; i += EXCHANGE_MAX_CHANGES) {
+      const chunk = changes.slice(i, i + EXCHANGE_MAX_CHANGES);
+      outcome = await this.bookorbit.exchangeBookmarks(auth, {
+        hash: file.document,
+        keys: first && keysComplete ? keys : [],
+        keysComplete: first && keysComplete,
+        changes: chunk.map(toKo),
       });
+      refusal(outcome, file.document);
+      if (chunk.length) {
+        await this.db.updateTable('bookmarks').set({ ko_dirty: false })
+          .where('book_file_id', '=', file.bookFileId).where('bookmark_id', 'in', chunk.map((c) => c.bookmark_id)).execute();
+      }
+      first = false;
+    }
+    if (keysComplete) {
+      await this.db.updateTable('bookmarks').set({ ko_key: null, ko_datetime: null, bookorbit_id: null })
+        .where('book_file_id', '=', file.bookFileId).where('deleted', '=', true).where('ko_key', 'is not', null).execute();
     }
 
-    const candidates = remote.filter((b) => !known.has(b.id));
-    if (!candidates.length) return;
-    const book = await this.clippings.book(file.bookFileId);
-    if (!book) return;
-    for (const bookmark of candidates) await this.adopt(file, bookmark, book.spine.length, bookmark.cfi ? cfiToXPointer(book, bookmark.cfi) : null);
+    for (let round = 0; outcome && round < MAX_ROUNDS; round++) {
+      const result = outcome.results.find((r) => r.hash === file.document);
+      if (!result) break;
+      const { add, delete: deletes } = result.toApply;
+      if (!add.length && !deletes.length) break;
+      const applied: BookmarkAckApplied[] = [];
+      const deleted: AckDeleted[] = [];
+      const spines = (await this.clippings.book(file.bookFileId))?.spine.length ?? 0;
+      for (const entry of add) applied.push(await this.applyRemote(file, entry, spines));
+      for (const entry of deletes) deleted.push(await this.applyRemoteDelete(file, entry));
+      await this.bookorbit.ackBookmarks(auth, { hash: file.document, applied, deleted });
+      if (!result.more) break;
+      outcome = await this.bookorbit.exchangeBookmarks(auth, { hash: file.document, keys: [], keysComplete: false, changes: [] });
+      refusal(outcome, file.document);
+    }
   }
 
-  private async adopt(file: ResolvedFile, bookmark: Bookmark, spines: number, point: { xpath: string; spine: number } | null) {
-    const live = point != null && point.xpath.length <= XPATH_MAX;
-    bookmarksTransferred.inc({ direction: 'to_device', kind: live ? 'created' : 'skipped' });
-    if (!live) {
+  /** Gives every live device bookmark a KOReader identity. */
+  private async identify(file: ResolvedFile): Promise<void> {
+    const rows = await this.db.selectFrom('bookmarks').select(['bookmark_id', 'xpath'])
+      .where('book_file_id', '=', file.bookFileId).where('deleted', '=', false).where('ko_datetime', 'is', null)
+      // Rows written through the old REST API wait for BookOrbit to hand them back with their identity.
+      .where('bookorbit_id', 'is', null).execute();
+    if (!rows.length) return;
+    const used = new Set((await this.db.selectFrom('bookmarks').select('ko_datetime').where('book_file_id', '=', file.bookFileId)
+      .where('ko_datetime', 'is not', null).execute()).map((r) => r.ko_datetime!));
+    let seconds = nowSeconds();
+    for (const row of rows) {
+      while (used.has(koDatetime(seconds))) seconds -= 1;
+      const datetime = koDatetime(seconds);
+      used.add(datetime);
+      await this.db.updateTable('bookmarks').set({ ko_datetime: datetime, ko_key: koKey(datetime, row.xpath), ko_dirty: true })
+        .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', row.bookmark_id).execute();
+    }
+  }
+
+  private async applyRemote(file: ResolvedFile, entry: BookmarkAddEntry, spines: number): Promise<BookmarkAckApplied> {
+    const failed: BookmarkAckApplied = { serverId: entry.serverId, status: 'failed' };
+    const point = parseXPointer(entry.pos);
+    if (!point || entry.pos.length > XPATH_MAX) {
       bookmarksUnanchored.inc({ direction: 'to_device' });
-      // Unconvertible bookmarks become tombstones so later pulls do not retry them.
-      await this.db.transaction().execute(async (tx) => tx.insertInto('bookmarks').values({
-        book_file_id: file.bookFileId, bookmark_id: `bookorbit-${bookmark.id}`, book_id: file.bookId, bookorbit_id: bookmark.id,
-        deleted: true, revision: await nextRevision(tx),
-      }).onConflict((oc) => oc.doNothing()).execute());
-      return;
+      bookmarksTransferred.inc({ direction: 'to_device', kind: 'skipped' });
+      return failed;
     }
-    const id = bookmarkIdFor(point.xpath);
-    const existing = await this.db.selectFrom('bookmarks').select(['bookorbit_id', 'deleted'])
-      .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', id).executeTakeFirst();
+    const id = bookmarkIdFor(entry.pos);
+    const existing = await this.db.selectFrom('bookmarks').selectAll()
+      .where('book_file_id', '=', file.bookFileId)
+      .where((eb) => eb.or([eb('bookorbit_id', '=', entry.serverId), eb('bookmark_id', '=', id)]))
+      .orderBy('deleted').executeTakeFirst();
+    const datetime = existing?.ko_datetime ?? koDatetime(nowSeconds());
+    const ack = { serverId: entry.serverId, status: 'applied' as const, key: koKey(datetime, existing?.xpath || entry.pos), datetime, pos: existing?.xpath || entry.pos };
+    if (existing?.deleted && existing.bookmark_id !== `bookorbit-${entry.serverId}`) {
+      // The device deleted it before BookOrbit had its key; the next key list reports the deletion.
+      await this.db.updateTable('bookmarks').set({ ko_datetime: datetime, ko_key: ack.key, bookorbit_id: entry.serverId })
+        .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', existing.bookmark_id).execute();
+      return ack;
+    }
+    const title = entry.title.slice(0, TITLE_MAX);
     if (existing && !existing.deleted) {
-      if (existing.bookorbit_id == null) {
-        // An unlinked device bookmark at the same spot adopts this BookOrbit bookmark.
-        await this.db.updateTable('bookmarks').set({ bookorbit_id: bookmark.id, title: bookmark.title })
-          .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', id).execute();
-      } else {
-        // A duplicate of a mapped bookmark is remembered as a tombstone so it is not retried.
-        await this.db.transaction().execute(async (tx) => tx.insertInto('bookmarks').values({
-          book_file_id: file.bookFileId, bookmark_id: `bookorbit-${bookmark.id}`, book_id: file.bookId, bookorbit_id: bookmark.id,
-          deleted: true, revision: await nextRevision(tx),
-        }).onConflict((oc) => oc.doNothing()).execute());
-      }
-      return;
+      const rename = existing.title !== title;
+      await this.db.transaction().execute(async (tx) => {
+        await tx.updateTable('bookmarks')
+          .set({
+            bookorbit_id: entry.serverId, ko_datetime: datetime, ko_key: ack.key, ko_dirty: false,
+            ...(rename ? { title, name: title === 'Bookmark' ? '' : truncateUtf8(title, NAME_MAX), revision: await nextRevision(tx) } : {}),
+          })
+          .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', existing.bookmark_id).execute();
+      });
+      if (rename) bookmarksTransferred.inc({ direction: 'to_device', kind: 'renamed' });
+      return ack;
     }
-    const name = bookmark.title === 'Bookmark' ? '' : truncateUtf8(bookmark.title, NAME_MAX);
+    bookmarksTransferred.inc({ direction: 'to_device', kind: 'created' });
     const fields = {
       book_id: file.bookId,
-      bookorbit_id: bookmark.id,
+      bookorbit_id: entry.serverId,
       deleted: false,
-      xpath: point.xpath,
+      xpath: entry.pos,
       percentage: spines ? Math.min(1, point.spine / spines) : 0,
-      summary: truncateUtf8(bookmark.title, SUMMARY_MAX),
+      summary: truncateUtf8(title, SUMMARY_MAX),
       si: point.spine,
       pc: 0,
-      pp: 0,
-      name,
+      pp: entry.pageno ?? 0,
+      name: title === 'Bookmark' ? '' : truncateUtf8(title, NAME_MAX),
       vo: null,
-      title: bookmark.title,
+      title,
+      ko_datetime: datetime,
+      ko_key: koKey(datetime, entry.pos),
+      ko_dirty: false,
     };
     await this.db.transaction().execute(async (tx) => {
       const revision = await nextRevision(tx);
@@ -315,5 +343,26 @@ export class BookmarkService {
         .onConflict((oc) => oc.columns(['book_file_id', 'bookmark_id']).doUpdateSet({ ...fields, revision }))
         .execute();
     });
+    return { ...ack, key: fields.ko_key, pos: entry.pos };
   }
+
+  private async applyRemoteDelete(file: ResolvedFile, entry: KoDeleteEntry): Promise<AckDeleted> {
+    const existing = await this.db.selectFrom('bookmarks').select(['bookmark_id', 'deleted'])
+      .where('book_file_id', '=', file.bookFileId).where('ko_key', '=', entry.key).executeTakeFirst();
+    if (existing && !existing.deleted) {
+      bookmarksTransferred.inc({ direction: 'to_device', kind: 'deleted' });
+      await this.db.transaction().execute(async (tx) => {
+        await tx.updateTable('bookmarks')
+          .set({ deleted: true, bookorbit_id: null, xpath: '', summary: '', name: '', title: '', vo: null, ko_key: null, ko_datetime: null, ko_dirty: false, revision: await nextRevision(tx) })
+          .where('book_file_id', '=', file.bookFileId).where('bookmark_id', '=', existing.bookmark_id).execute();
+      });
+    }
+    return { serverId: entry.serverId, status: 'applied' };
+  }
+}
+
+function toKo(row: StoredBookmark): KoBookmark {
+  // A dogear's BookOrbit title is its note: the device name, else its summary, as before.
+  const note = row.title === 'Bookmark' ? '' : row.title.trim();
+  return { datetime: row.ko_datetime!, pos: row.xpath, ...(note ? { note } : {}), ...(row.pp ? { pageno: row.pp } : {}) };
 }

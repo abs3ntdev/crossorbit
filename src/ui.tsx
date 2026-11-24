@@ -18,6 +18,7 @@ interface Clip {
   book_id: number;
   clipping_id: string;
   annotation_id: number | null;
+  ko_key: string | null;
   revision: string | number;
   deleted: boolean | number;
   chapter: string;
@@ -25,8 +26,14 @@ interface Clip {
   created_at: string | number;
 }
 
+/** A live clipping is synced once it has a KOReader key (or a link from the old REST sync). */
 const statusOf = (c: Clip): Status =>
-  (c.deleted && c.clipping_id.startsWith('bookorbit-')) || c.annotation_id == null ? 'unanchored' : c.deleted ? 'deleted' : 'synced';
+  c.deleted ? 'deleted' : c.ko_key == null && c.annotation_id == null ? 'unanchored' : 'synced';
+
+const PROBLEM_TEXT: Record<string, string> = {
+  unmatched: 'BookOrbit does not know this file; uploads wait until it does',
+  position_incompatible: 'BookOrbit cannot map positions for this file (not an EPUB it can read)',
+};
 
 const toDate = (v: Date | string | number | null | undefined) => (v == null ? null : v instanceof Date ? v : new Date(v));
 
@@ -148,7 +155,7 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
     const [documents, positions, counts, marks] = await Promise.all([
       db.selectFrom('documents').selectAll().orderBy('resolved_at', 'desc').execute(),
       db.selectFrom('positions').selectAll().orderBy('updated_at', 'desc').execute(),
-      db.selectFrom('clippings').select(['book_file_id', 'clipping_id', 'annotation_id', 'deleted']).execute(),
+      db.selectFrom('clippings').select(['book_file_id', 'clipping_id', 'annotation_id', 'ko_key', 'deleted']).execute(),
       db.selectFrom('bookmarks').select(['book_file_id', (eb) => eb.fn.countAll().as('n')]).where('deleted', '=', false)
         .groupBy('book_file_id').execute(),
     ]);
@@ -279,12 +286,13 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
   });
 
   app.get('/problems', async (c) => {
-    const [h, clips, list] = await Promise.all([
+    const [h, clips, list, refused] = await Promise.all([
       health(),
       db.selectFrom('clippings').selectAll()
-        .where((eb) => eb.or([eb('annotation_id', 'is', null), eb.and([eb('clipping_id', 'like', 'bookorbit-%'), eb('deleted', '=', true)])]))
+        .where('deleted', '=', false).where('ko_key', 'is', null).where('annotation_id', 'is', null)
         .orderBy('revision', 'desc').limit(200).execute(),
       books(),
+      db.selectFrom('exchange_problems').selectAll().orderBy('updated_at', 'desc').limit(200).execute(),
     ]);
     const failed = list.filter((b) => b.meta === 'error' || b.meta === null);
     return c.html('<!doctype html>' +
@@ -303,6 +311,24 @@ export function createUi(db: Db, bookorbit: BookOrbit, log: Logger) {
                   <td>{b.bookFileId}</td>
                   <td class="mono">{b.documents.join(', ')}</td>
                   <td>{b.meta === null ? 'not found' : 'request failed'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <h2>Exchanges BookOrbit refused</h2>
+        {refused.length === 0 ? (
+          <Empty>BookOrbit accepts every book's highlights and bookmarks.</Empty>
+        ) : (
+          <table>
+            <thead><tr><th>Document</th><th>Kind</th><th>Problem</th><th>Seen</th></tr></thead>
+            <tbody>
+              {refused.map((p) => (
+                <tr>
+                  <td class="mono">{p.document}</td>
+                  <td>{p.kind === 'clipping' ? 'highlights' : 'bookmarks'}</td>
+                  <td>{PROBLEM_TEXT[p.problem] ?? p.problem}</td>
+                  <td><Time value={p.updated_at} /></td>
                 </tr>
               ))}
             </tbody>
@@ -338,7 +364,7 @@ function Clips({ rows, book }: { rows: Clip[]; book?: boolean }) {
             </div>
             {r.text ? <blockquote>{r.text}</blockquote> : <p class="dim">No text stored.</p>}
             <p class="dim mono">
-              rev {String(r.revision)} · annotation {r.annotation_id ?? 'none'} · {r.clipping_id} · created <Time value={epoch(r.created_at)} />
+              rev {String(r.revision)} · key {r.ko_key ?? 'none'} · {r.clipping_id} · created <Time value={epoch(r.created_at)} />
             </p>
           </li>
         );

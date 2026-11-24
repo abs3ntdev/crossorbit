@@ -13,6 +13,7 @@ import { sql } from 'kysely';
 import { connect, type Db, migrate } from '../src/db.js';
 import { createLogger } from '../src/log.js';
 import { registry, trackStorage } from '../src/metrics.js';
+import { FakeExchange } from './fake-exchange.js';
 import { fixtureEpub } from './fixture.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test';
@@ -22,20 +23,10 @@ const LATE = 'fedcba9876543210fedcba9876543210';
 const AUTH = { 'x-auth-user': 'reader', 'x-auth-key': '5f4dcc3b5aa765d61d8327deb882cf99' };
 const API_KEY = 'bok_test';
 
-interface FakeAnnotation {
-  id: number;
-  bookId: number;
-  cfi: string;
-  text: string;
-  chapterTitle: string | null;
-  createdAt: string;
-}
-
 class FakeBookOrbit {
-  annotations: FakeAnnotation[] = [];
+  exchange = new FakeExchange((hash) => hash === HASH || (this.lateKnown && hash === LATE));
   progress: unknown[] = [];
   requests: string[] = [];
-  nextId = 100;
   failDownload = false;
   hang = false;
   lateKnown = false;
@@ -76,24 +67,15 @@ class FakeBookOrbit {
           return json(200, { document: body.document, timestamp: 1 });
         }
         if (path.startsWith('/api/v1/koreader/syncs/progress/')) return json(200, this.progress.at(-1) ?? {});
+        const exchanged = this.exchange.handle(path, body);
+        if (exchanged) return json(exchanged.status, exchanged.value);
       }
       if (req.headers['x-api-key'] !== API_KEY) return json(401);
-      if (this.forbidden && req.method !== 'GET') return json(403, { message: 'This API key is read-only', errorCode: 'API_KEY_READ_ONLY' });
+      if (this.forbidden) return json(403, { message: 'This API key is read-only', errorCode: 'API_KEY_READ_ONLY' });
       if (path === '/api/v1/books/files/11/serve') {
         if (this.failDownload) return json(500);
         res.writeHead(200, { 'content-type': 'application/epub+zip' });
         return res.end(Buffer.from(fixtureEpub()));
-      }
-      const m = /^\/api\/v1\/books\/1\/annotations(?:\/(\d+))?(?:\?.*)?$/.exec(path);
-      if (m && req.method === 'GET') return json(200, this.annotations);
-      if (m && req.method === 'POST') {
-        const a = { id: this.nextId++, bookId: 1, cfi: body.cfi, text: body.text, chapterTitle: body.chapterTitle, createdAt: new Date().toISOString() };
-        this.annotations.push(a);
-        return json(201, a);
-      }
-      if (m?.[1] && req.method === 'DELETE') {
-        this.annotations = this.annotations.filter((a) => a.id !== Number(m[1]));
-        return json(204);
       }
       json(404);
     });
@@ -196,88 +178,124 @@ describe('firmware clipping sequence', () => {
     expect(res.status).toBe(401);
   });
 
-  it('runs probe, deletion, upload, and paged pull', async () => {
-    fake.annotations.push({ id: 7, bookId: 1, cfi: 'epubcfi(/6/2!/4/4,/1:7,/1:16)', text: 'paragraph', chapterTitle: 'Web', createdAt: '2026-01-01T00:00:00.000Z' });
+  const P = (n: number, offset: number) => `/body/DocFragment[1]/body/p[${n}]/text().${offset}`;
+  const sent = () => fake.exchange.bodies.filter((b) => b.path.endsWith('/annotations/exchange'));
+
+  it('runs probe, deletion, upload, and paged pull through the annotation exchange', async () => {
+    const web = fake.exchange.addAnnotation({ text: 'paragraph', pos0: P(2, 7), pos1: P(2, 16), chapter: 'Web' });
 
     const probe = await call('GET', `/api/v1/clippings/${HASH}?cursor=0&limit=1&format=reader`);
     expect(probe.status).toBe(200);
     expect(probe.body).toMatchObject({ document: HASH, sync_version: 2, more: false });
     expect(probe.body.items).toEqual([
-      expect.objectContaining({ deleted: 0, spine: 0, start_offset: 29, end_offset: 38, text: 'paragraph', chapter: 'Web', layout_signature: 0, pages: 1 }),
+      expect.objectContaining({ id: `bookorbit-${web.id}`, deleted: 0, spine: 0, start_offset: 29, end_offset: 38, text: 'paragraph', chapter: 'Web', layout_signature: 0, pages: 1 }),
     ]);
-    const webId = probe.body.items[0].id as string;
+    expect(web.key).not.toBeNull();
+    expect(sent().at(-1)!.body).toMatchObject({
+      deviceId: expect.stringMatching(/^crossorbit-[0-9a-f]{24}$/), deviceModel: 'CrossPoint', pluginVersion: expect.any(String),
+      books: [{ hash: HASH, sidecarState: 'known', keysComplete: true }],
+    });
 
     const deletion = await call('PUT', `/api/v1/clippings/${HASH}`, { items: [{ id: 'never-synced', deleted: 1 }] });
     expect(deletion.body).toMatchObject({ accepted: 1 });
 
     const upload = await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev1', 'brave new', 6)] });
     expect(upload.body).toMatchObject({ accepted: 1 });
-    expect(fake.annotations.find((a) => a.text === 'brave new')?.cfi).toBe('epubcfi(/6/2!/4/2,/1:6,/1:15)');
+    expect(fake.exchange.live('brave new')).toEqual([expect.objectContaining({ pos0: P(1, 6), pos1: P(1, 15), chapter: 'One' })]);
+    const datetime = fake.exchange.live('brave new')[0].datetime;
+    expect(datetime).toBe('2023-11-14 22:13:20');
 
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev2', 'Second paragraph', 0)] });
-    expect(fake.annotations.find((a) => a.text === 'Second paragraph')?.cfi).toBe('epubcfi(/6/2!/4/4,/1:0,/1:16)');
+    expect(fake.exchange.live('Second paragraph')).toEqual([expect.objectContaining({ pos0: P(2, 0), pos1: P(2, 16) })]);
+    // Same created_at: KOReader identity needs distinct datetimes.
+    expect(fake.exchange.live('Second paragraph')[0].datetime).not.toBe(datetime);
 
     const items = await pullAll();
     const byId = new Map(items.map((i) => [i.id, i]));
     expect(byId.get('never-synced')).toEqual({ id: 'never-synced', revision: expect.any(Number), deleted: 1 });
     expect(byId.get('dev1')).toEqual({ ...clip('dev1', 'brave new', 6), revision: expect.any(Number), deleted: 0 });
-    expect(byId.get(webId)).toMatchObject({ deleted: 0 });
+    expect(byId.get(`bookorbit-${web.id}`)).toMatchObject({ deleted: 0 });
     expect(items).toHaveLength(4);
   });
 
-  it('never resurrects tombstones and mirrors BookOrbit deletions', async () => {
-    const dev1 = fake.annotations.find((a) => a.text === 'brave new')!;
+  it('reports device deletions through the key list and mirrors BookOrbit deletions', async () => {
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [{ id: 'dev1', deleted: 1 }] });
-    expect(fake.annotations.some((a) => a.id === dev1.id)).toBe(false);
+    expect(fake.exchange.live('brave new')).toHaveLength(0);
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev1', 'brave new', 6)] });
-    expect(fake.annotations.some((a) => a.text === 'brave new')).toBe(false);
+    expect(fake.exchange.live('brave new')).toHaveLength(0);
 
-    fake.annotations = fake.annotations.filter((a) => a.id !== 7);
+    fake.exchange.live('paragraph')[0].deleted = true;
     const items = await pullAll();
     const byId = new Map(items.map((i) => [i.id, i]));
     expect(byId.get('dev1')).toMatchObject({ deleted: 1 });
     expect(items.filter((i) => i.deleted === 1)).toHaveLength(3);
     expect(byId.get('dev2')).toMatchObject({ deleted: 0 });
+    expect(fake.exchange.annotations.filter((a) => a.deleted && a.key)).toEqual([]);
+  });
+
+  it('mirrors BookOrbit edits onto the device clipping', async () => {
+    const row = fake.exchange.live('Second paragraph')[0];
+    fake.exchange.editAnnotation(row, { text: 'Second', pos1: P(2, 6), note: 'web note' });
+    const items = await pullAll();
+    expect(items.find((i) => i.id === 'dev2')).toMatchObject({ deleted: 0, text: 'Second', start_offset: 22, end_offset: 28 });
+    const stored = await db.selectFrom('clippings').select(['note', 'ko_key']).where('clipping_id', '=', 'dev2').executeTakeFirstOrThrow();
+    expect(stored.note).toBe('web note');
+    expect(row.linked).toBe(row.version);
   });
 
   it('retries mirroring when the EPUB download fails', async () => {
-    fake.annotations.push({ id: 8, bookId: 1, cfi: 'epubcfi(/6/2!/4/2,/1:0,/1:5)', text: 'Hello', chapterTitle: null, createdAt: '2026-01-02T00:00:00.000Z' });
+    const hello = fake.exchange.addAnnotation({ text: 'Hello', pos0: P(1, 0), pos1: P(1, 5) });
     fake.failDownload = true;
     const shared = app;
     app = createApp(db, new BookOrbit(fake.url, API_KEY), createLogger('error'));
     const failed = await pullAll().finally(() => { app = shared; });
-    expect(failed.some((i) => i.id === 'bookorbit-8' || i.text === 'Hello')).toBe(false);
+    expect(failed.some((i) => i.id === `bookorbit-${hello.id}`)).toBe(false);
     fake.failDownload = false;
     expect((await pullAll()).find((i) => i.text === 'Hello')).toMatchObject({ deleted: 0 });
   });
 
-  it('re-anchors on offset moves and keeps the old annotation when the new anchor fails', async () => {
+  it('re-anchors on offset moves and keeps the old anchor when the new one fails', async () => {
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'world', 16)] });
-    const first = fake.annotations.find((a) => a.text === 'world')!;
+    expect(fake.exchange.live('world')).toEqual([expect.objectContaining({ pos0: P(1, 16) })]);
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'world', 1)] });
-    const moved = fake.annotations.filter((a) => a.text === 'world');
-    expect(moved).toHaveLength(1);
-    expect(moved[0].id).not.toBe(first.id);
+    // Offset 1 does not hold the text, so the anchor falls back to finding it: still one highlight at 16.
+    expect(fake.exchange.live('world')).toEqual([expect.objectContaining({ pos0: P(1, 16) })]);
+    const before = await db.selectFrom('clippings').select(['ko_key', 'pos0']).where('clipping_id', '=', 'dev3').executeTakeFirstOrThrow();
     await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev3', 'absent', 16)] });
-    expect(fake.annotations.some((a) => a.id === moved[0].id)).toBe(true);
-    const row = await db.selectFrom('clippings').select('annotation_id').where('clipping_id', '=', 'dev3').executeTakeFirstOrThrow();
-    expect(row.annotation_id).toBe(moved[0].id);
+    expect(fake.exchange.live('world')).toHaveLength(1);
+    const after = await db.selectFrom('clippings').select(['ko_key', 'pos0']).where('clipping_id', '=', 'dev3').executeTakeFirstOrThrow();
+    expect(after).toEqual(before);
   });
 
-  it('mirrors more than one batch of annotations', async () => {
-    for (let i = 0; i < 60; i++) {
-      fake.annotations.push({ id: 1000 + i, bookId: 1, cfi: 'epubcfi(/6/2!/4/4,/1:0,/1:6)', text: 'Second', chapterTitle: null, createdAt: new Date(Date.UTC(2025, 0, 1, 0, i)).toISOString() });
-    }
+  it('pages through more than one batch of BookOrbit highlights', async () => {
+    const made = Array.from({ length: 60 }, () => fake.exchange.addAnnotation({ text: 'Second', pos0: P(2, 0), pos1: P(2, 6) }));
     const items = await pullAll();
-    expect(items.filter((i) => i.text === 'Second' && i.deleted === 0)).toHaveLength(60);
-    fake.annotations = fake.annotations.filter((a) => a.id < 1000);
-    expect((await pullAll()).filter((i) => i.text === 'Second')).toHaveLength(0);
+    expect(items.filter((i) => i.text === 'Second' && i.deleted === 0).length).toBeGreaterThanOrEqual(60);
+    expect(made.every((a) => a.key)).toBe(true);
+    for (const a of made) a.deleted = true;
+    const ids = new Set(made.map((a) => `bookorbit-${a.id}`));
+    expect((await pullAll()).filter((i) => ids.has(i.id as string) && i.deleted === 0)).toHaveLength(0);
   });
 
   it('serializes concurrent pushes of the same clipping', async () => {
     const push = () => call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev4', 'Hello brave', 0)] });
     await Promise.all([push(), push(), push()]);
-    expect(fake.annotations.filter((a) => a.text === 'Hello brave')).toHaveLength(1);
+    expect(fake.exchange.live('Hello brave')).toHaveLength(1);
+  });
+
+  it('keeps clippings pending and reports a book BookOrbit cannot position', async () => {
+    fake.exchange.incompatible.add(HASH);
+    try {
+      await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('dev5', 'new world', 10)] });
+      expect(fake.exchange.live('new world')).toHaveLength(0);
+      const problem = await db.selectFrom('exchange_problems').select(['kind', 'problem']).where('document', '=', HASH).execute();
+      expect(problem).toEqual([{ kind: 'clipping', problem: 'position_incompatible' }]);
+    } finally {
+      fake.exchange.incompatible.delete(HASH);
+    }
+    await pullAll();
+    expect(fake.exchange.live('new world')).toHaveLength(1);
+    expect(await db.selectFrom('exchange_problems').selectAll().where('document', '=', HASH).execute()).toEqual([]);
   });
 
   it('returns an empty page for unknown books', async () => {
@@ -308,10 +326,10 @@ describe('unmatched books and fixes from the audit', () => {
 
     const page = await call('GET', `/api/v1/clippings/${LATE}?cursor=0&limit=50&format=reader`);
     expect(page.status).toBe(200);
-    const row = await db.selectFrom('clippings').select(['deleted', 'text', 'annotation_id']).where('clipping_id', '=', 'late1').executeTakeFirstOrThrow();
+    const row = await db.selectFrom('clippings').select(['deleted', 'text', 'ko_key']).where('clipping_id', '=', 'late1').executeTakeFirstOrThrow();
     expect(row).toMatchObject({ text: 'Hello' });
     expect(Boolean(row.deleted)).toBe(false);
-    expect(fake.annotations.some((a) => a.id === row.annotation_id)).toBe(true);
+    expect(fake.exchange.annotations.some((a) => a.key === row.ko_key && !a.deleted)).toBe(true);
     expect(await db.selectFrom('pending_items').selectAll().execute()).toEqual([]);
   });
 
@@ -353,6 +371,8 @@ describe('unmatched books and fixes from the audit', () => {
 
   it('explains a refused API key', async () => {
     fake.forbidden = true;
+    const shared = app;
+    app = createApp(db, new BookOrbit(fake.url, API_KEY), createLogger('error'));
     try {
       const res = await call('PUT', `/api/v1/clippings/${HASH}`, { items: [clip('ro1', 'Hello brave new', 0)] });
       expect(res.status).toBe(502);
@@ -360,6 +380,7 @@ describe('unmatched books and fixes from the audit', () => {
       expect(res.body.message).toContain('This API key is read-only');
     } finally {
       fake.forbidden = false;
+      app = shared;
     }
   });
 });

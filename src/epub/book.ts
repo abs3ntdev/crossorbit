@@ -2,7 +2,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
 import { parseDocument } from 'htmlparser2';
 
-import type { CfiNode } from './cfi.js';
+import type { DomNode } from './dom.js';
 
 const xml = new XMLParser({ ignoreAttributes: false, removeNSPrefix: true, attributeNamePrefix: '@_' });
 
@@ -58,11 +58,11 @@ export class EpubBook {
     return data ? strFromU8(data) : null;
   }
 
-  chapter(index: number): CfiNode | null {
+  chapter(index: number): DomNode | null {
     const href = this.spine[index];
     const source = href != null ? this.read(href) : null;
     if (source == null) return null;
-    return parseDocument(source, { xmlMode: false, recognizeSelfClosing: true, lowerCaseTags: true }) as unknown as CfiNode;
+    return parseDocument(source, { xmlMode: false, recognizeSelfClosing: true, lowerCaseTags: true }) as unknown as DomNode;
   }
 }
 

@@ -3,7 +3,7 @@ import { sql } from 'kysely';
 
 import { BookOrbit, BookOrbitError, type DeviceAuth } from './bookorbit.js';
 import { BookmarkService, decodeBookmarkBatch, type IncomingBookmark, parseBookmarkQuery } from './bookmarks.js';
-import { ClippingService, type ResolvedFile } from './clippings.js';
+import { ClippingService, ExchangeRefused, type ResolvedFile } from './clippings.js';
 import { decodeSessionBatch, SessionService } from './sessions.js';
 import { type Db, now } from './db.js';
 import type { Logger } from './log.js';
@@ -69,11 +69,47 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
   const sessions = new SessionService(db, bookorbit, clippings, log);
   const pending = new PendingStore(db);
 
-  /** Replays uploads that arrived while the book was still unmatched. */
-  async function flush(auth: DeviceAuth, document: string, file: ResolvedFile) {
-    const replayed = await pending.drain<IncomingItem>(auth.user, document, 'clipping', (items) => clippings.apply(file, items))
-      + await pending.drain<IncomingBookmark>(auth.user, document, 'bookmark', (items) => bookmarks.apply(file, items));
-    if (replayed) log.info('pending items replayed', { document, bookFileId: file.bookFileId, items: replayed });
+  type Kind = 'clipping' | 'bookmark';
+
+  async function problem(auth: DeviceAuth, document: string, kind: Kind, value: string | null) {
+    const key = { username: auth.user, document: document.toLowerCase(), kind };
+    if (value == null) {
+      await db.deleteFrom('exchange_problems').where('username', '=', key.username).where('document', '=', key.document).where('kind', '=', kind).execute();
+      return;
+    }
+    await db.insertInto('exchange_problems').values({ ...key, problem: value })
+      .onConflict((oc) => oc.columns(['username', 'document', 'kind']).doUpdateSet({ problem: value, updated_at: now(db) }))
+      .execute();
+  }
+
+  /**
+   * Moves pending uploads into the revision log and runs the BookOrbit exchange for the book. Rows stay
+   * marked for the exchange until BookOrbit takes them. Returns false when BookOrbit refused the book.
+   */
+  async function sync(auth: DeviceAuth, file: ResolvedFile, kind: Kind, incoming: unknown[] = []): Promise<boolean> {
+    const service = kind === 'clipping' ? clippings : bookmarks;
+    const queued = await pending.peek<IncomingItem & IncomingBookmark>(auth.user, file.document, kind);
+    await service.apply(file, [...queued, ...incoming] as never);
+    if (queued.length) {
+      await pending.remove(auth.user, file.document, kind, queued.map((q) => q.id));
+      log.info('pending items replayed', { document: file.document, bookFileId: file.bookFileId, kind, items: queued.length });
+    }
+    try {
+      await service.exchange(file, auth);
+    } catch (error) {
+      if (!(error instanceof ExchangeRefused)) throw error;
+      await problem(auth, file.document, kind, error.problem);
+      log.warn(`${kind} exchange refused`, { document: file.document, bookFileId: file.bookFileId, problem: error.problem });
+      return false;
+    }
+    await problem(auth, file.document, kind, null);
+    return true;
+  }
+
+  async function keep(auth: DeviceAuth, document: string, kind: Kind, items: { id: string; deleted: boolean }[]) {
+    await pending.put(auth.user, document, kind, items);
+    await problem(auth, document, kind, 'unmatched');
+    log.info(`${kind}s kept for unmatched book`, { document, items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`) });
   }
 
   /** Pushes a progress write stored while the book was unmatched, dropping it once BookOrbit accepts it. */
@@ -204,8 +240,8 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const document = c.req.param('document');
     checkDocument(document);
     const { cursor, limit } = parsePageQuery(c.req.query());
-    const file = await clippings.resolve(document, auth);
-    if (file && cursor === 0) await flush(auth, document, file);
+    let file = await clippings.resolve(document, auth);
+    if (file && cursor === 0 && !(await sync(auth, file, 'clipping'))) file = null;
     const page = await clippings.page(document, file, cursor, limit);
     log.info('clippings pulled', {
       document,
@@ -227,12 +263,10 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const items = decodeBatch(await c.req.json().catch(() => null));
     const file = await clippings.resolve(document, auth);
     if (!file) {
-      await pending.put(auth.user, document, 'clipping', items);
-      log.info('clippings kept for unmatched book', { document, items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`) });
+      await keep(auth, document, 'clipping', items);
       return c.json({ until: Math.floor(Date.now() / 1000), accepted: items.length });
     }
-    await flush(auth, document, file);
-    await clippings.apply(file, items);
+    await sync(auth, file, 'clipping', items);
     log.info('clippings pushed', {
       document,
       bookFileId: file.bookFileId,
@@ -247,8 +281,8 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const document = c.req.param('document');
     checkDocument(document);
     const { cursor, limit } = parseBookmarkQuery(c.req.query());
-    const file = await clippings.resolve(document, auth);
-    if (file && cursor === 0) await flush(auth, document, file);
+    let file = await clippings.resolve(document, auth);
+    if (file && cursor === 0 && !(await sync(auth, file, 'bookmark'))) file = null;
     const page = await bookmarks.page(document, file, cursor, limit);
     log.info('bookmarks pulled', {
       document,
@@ -270,12 +304,10 @@ export function createApp(db: Db, bookorbit: BookOrbit, log: Logger) {
     const items = decodeBookmarkBatch(await c.req.json().catch(() => null));
     const file = await clippings.resolve(document, auth);
     if (!file) {
-      await pending.put(auth.user, document, 'bookmark', items);
-      log.info('bookmarks kept for unmatched book', { document, items: items.map((item) => `${item.id}${item.deleted ? ':deleted' : ''}`) });
+      await keep(auth, document, 'bookmark', items);
       return c.json({ accepted: items.length });
     }
-    await flush(auth, document, file);
-    await bookmarks.apply(file, items);
+    await sync(auth, file, 'bookmark', items);
     log.info('bookmarks pushed', {
       document,
       bookFileId: file.bookFileId,

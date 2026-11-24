@@ -49,11 +49,12 @@ beforeAll(async () => {
   await db.insertInto('positions').values({ username: 'reader', document: 'aaaa', progress: 'x', percentage: 0.42, position: { a: 1 } }).execute();
   const base = { book_file_id: 11, book_id: 1, chapter: 'One', created_at: 1700000000, deleted: false, text: '' };
   await db.insertInto('clippings').values([
-    { ...base, clipping_id: 'c1', annotation_id: 100, revision: 1, text: '<script>alert(1)</script>' },
-    { ...base, clipping_id: 'c2', annotation_id: 101, revision: 2, deleted: true },
-    { ...base, clipping_id: 'bookorbit-102', annotation_id: 102, revision: 3, deleted: true },
-    { ...base, clipping_id: 'c3', annotation_id: null, revision: 4, text: 'loose' },
+    { ...base, clipping_id: 'c1', ko_key: 'k1', revision: 1, text: '<script>alert(1)</script>' },
+    { ...base, clipping_id: 'c2', revision: 2, deleted: true },
+    { ...base, clipping_id: 'legacy', annotation_id: 102, revision: 3, text: 'old rest' },
+    { ...base, clipping_id: 'c3', revision: 4, text: 'loose' },
   ]).execute();
+  await db.insertInto('exchange_problems').values({ username: 'reader', document: 'cccc', kind: 'bookmark', problem: 'position_incompatible' }).execute();
   ui = createUi(db, new BookOrbit(url, API_KEY), createLogger('error'));
 });
 
@@ -75,8 +76,8 @@ describe('ui', () => {
     expect(text).toContain('Dune &lt;b&gt;');
     expect(text).toContain('Frank Herbert');
     expect(text).toContain('42.0%');
-    expect(text).toContain('1 synced');
-    expect(text).toContain('2 unanchored');
+    expect(text).toContain('2 synced');
+    expect(text).toContain('1 unanchored');
     expect(text).toContain('1 deleted');
     expect(text).toContain('Database up');
     expect(text).toContain('BookOrbit up');
@@ -99,8 +100,10 @@ describe('ui', () => {
     expect(activity.text).toContain('reader');
     const problems = await get('/problems');
     expect(problems.status).toBe(200);
-    expect(problems.text).toContain('bookorbit-102');
     expect(problems.text).toContain('loose');
+    expect(problems.text).not.toContain('old rest');
+    expect(problems.text).toContain('cccc');
+    expect(problems.text).toContain('cannot map positions');
     expect(problems.text).toContain('request failed');
     expect(problems.text).not.toContain('&lt;script&gt;');
   });

@@ -16,17 +16,19 @@ export class PendingStore {
     }
   }
 
-  /** Runs `apply` on the stored items in upload order, removing each batch once it succeeds. */
-  async drain<T>(username: string, document: string, kind: string, apply: (items: T[]) => Promise<void>): Promise<number> {
-    const rows = await this.db.selectFrom('pending_items').select(['item_id', 'payload'])
+  /** The stored items in upload order. */
+  async peek<T>(username: string, document: string, kind: string): Promise<T[]> {
+    const rows = await this.db.selectFrom('pending_items').select(['payload'])
       .where('username', '=', username).where('document', '=', document.toLowerCase()).where('kind', '=', kind)
       .orderBy('updated_at').execute();
-    if (!rows.length) return 0;
-    await apply(rows.map((r) => (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) as T));
+    return rows.map((r) => (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) as T);
+  }
+
+  async remove(username: string, document: string, kind: string, ids: string[]): Promise<void> {
+    if (!ids.length) return;
     await this.db.deleteFrom('pending_items')
       .where('username', '=', username).where('document', '=', document.toLowerCase()).where('kind', '=', kind)
-      .where('item_id', 'in', rows.map((r) => r.item_id)).execute();
-    return rows.length;
+      .where('item_id', 'in', ids).execute();
   }
 
   async count(username: string, document: string, kind: string): Promise<number> {

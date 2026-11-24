@@ -29,6 +29,13 @@ export interface Schema {
     layout_signature: Generated<string | number>;
     start_offset: string | number | null;
     end_offset: string | number | null;
+    ko_datetime: string | null;
+    ko_key: string | null;
+    pos0: string | null;
+    pos1: string | null;
+    note: string | null;
+    color: string | null;
+    ko_dirty: Generated<boolean | number>;
   };
   positions: {
     username: string;
@@ -55,6 +62,9 @@ export interface Schema {
     name: Generated<string>;
     vo: string | number | null;
     title: Generated<string>;
+    ko_datetime: string | null;
+    ko_key: string | null;
+    ko_dirty: Generated<boolean | number>;
   };
   reading_sessions: {
     session_id: string;
@@ -92,6 +102,13 @@ export interface Schema {
     document: string;
     title: string | null;
     authors: string | null;
+    updated_at: Generated<Date | string>;
+  };
+  exchange_problems: {
+    username: string;
+    document: string;
+    kind: string;
+    problem: string;
     updated_at: Generated<Date | string>;
   };
 }
@@ -280,6 +297,28 @@ const migrations: Record<string, Migration> = {
         .addColumn('authors', 'text')
         .addColumn('updated_at', ts, (c) => c.notNull().defaultTo(now(db)))
         .addPrimaryKeyConstraint('document_hints_pkey', ['username', 'document'])
+        .execute();
+    },
+  },
+  '006_koreader_exchange': {
+    async up(db) {
+      const ts = isSqlite(db) ? 'text' : 'timestamptz';
+      // Existing rows already reached BookOrbit through the REST API, so they start clean; the first
+      // exchange then reports them in its key list and BookOrbit links them by datetime.
+      for (const table of ['clippings', 'bookmarks'] as const) {
+        const columns = table === 'clippings' ? ['ko_datetime', 'ko_key', 'pos0', 'pos1', 'note', 'color'] : ['ko_datetime', 'ko_key'];
+        for (const column of columns) await db.schema.alterTable(table).addColumn(column, 'text').execute();
+        await db.schema.alterTable(table).addColumn('ko_dirty', 'boolean', (c) => c.notNull().defaultTo(false)).execute();
+      }
+      await db.schema.createIndex('clippings_ko_key').on('clippings').columns(['book_file_id', 'ko_key']).execute();
+      await db.schema.createIndex('bookmarks_ko_key').on('bookmarks').columns(['book_file_id', 'ko_key']).execute();
+      await db.schema.createTable('exchange_problems')
+        .addColumn('username', 'text', (c) => c.notNull())
+        .addColumn('document', 'text', (c) => c.notNull())
+        .addColumn('kind', 'text', (c) => c.notNull())
+        .addColumn('problem', 'text', (c) => c.notNull())
+        .addColumn('updated_at', ts, (c) => c.notNull().defaultTo(now(db)))
+        .addPrimaryKeyConstraint('exchange_problems_pkey', ['username', 'document', 'kind'])
         .execute();
     },
   },

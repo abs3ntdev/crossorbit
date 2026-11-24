@@ -11,10 +11,9 @@ import { createApp } from '../src/app.js';
 import { BookOrbit } from '../src/bookorbit.js';
 import { bookmarkIdFor } from '../src/bookmarks.js';
 import { connect, type Db, migrate } from '../src/db.js';
-import { EpubBook } from '../src/epub/book.js';
-import { cfiToXPointer, xpointerToCfi } from '../src/epub/xpointer.js';
 import { createLogger } from '../src/log.js';
 import { registry } from '../src/metrics.js';
+import { FakeExchange } from './fake-exchange.js';
 import { fixtureEpub } from './fixture.js';
 
 const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgres://bookorbit:bookorbit@localhost:55432/crossorbit_test';
@@ -25,14 +24,11 @@ const LATE_SAME = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const AUTH = { 'x-auth-user': 'reader', 'x-auth-key': '5f4dcc3b5aa765d61d8327deb882cf99' };
 const API_KEY = 'bok_test';
 
-interface FakeBookmark { id: number; bookId: number; cfi: string | null; title: string; bookFileId?: number }
-
 class FakeBookOrbit {
-  bookmarks: FakeBookmark[] = [];
+  exchange = new FakeExchange((hash) => hash === HASH || (this.lateKnown && (hash === LATE || hash === LATE_SAME)));
   sessions: Record<string, unknown>[] = [];
   lateKnown = false;
   failSessions = false;
-  nextId = 500;
   server!: Server;
   url = '';
 
@@ -56,6 +52,8 @@ class FakeBookOrbit {
           if (this.lateKnown && body.hashes.includes(LATE_SAME)) matches.push({ hash: LATE_SAME, bookId: 1, bookFileId: 11 });
           return json(201, { matches });
         }
+        const exchanged = this.exchange.handle(path, body);
+        if (exchanged) return json(exchanged.status, exchanged.value);
       }
       if (req.headers['x-api-key'] !== API_KEY) return json(401);
       if (path === '/api/v1/books/files/11/serve') {
@@ -66,23 +64,6 @@ class FakeBookOrbit {
       if (s && req.method === 'POST') {
         if (this.failSessions) return json(500);
         if (!this.sessions.some((x) => x.sessionId === body.sessionId)) this.sessions.push({ fileId: Number(s[1]), ...body });
-        return json(204);
-      }
-      const m = /^\/api\/v1\/books\/1\/bookmarks(?:\/(\d+))?(?:\?.*)?$/.exec(path);
-      if (m && !m[1] && req.method === 'GET') return json(200, this.bookmarks);
-      if (m && !m[1] && req.method === 'POST') {
-        const b = { id: this.nextId++, bookId: 1, cfi: body.cfi, title: body.title, bookFileId: body.bookFileId };
-        this.bookmarks.push(b);
-        return json(201, b);
-      }
-      const existing = m?.[1] ? this.bookmarks.find((b) => b.id === Number(m[1])) : undefined;
-      if (m?.[1] && !existing) return json(404);
-      if (existing && req.method === 'PATCH') {
-        existing.title = body.title;
-        return json(200, existing);
-      }
-      if (existing && req.method === 'DELETE') {
-        this.bookmarks = this.bookmarks.filter((b) => b !== existing);
         return json(204);
       }
       json(404);
@@ -145,24 +126,6 @@ afterAll(async () => {
   fake.server?.close();
 });
 
-describe('xpointer conversion', () => {
-  const book = new EpubBook(fixtureEpub());
-
-  it('round trips text positions', () => {
-    expect(xpointerToCfi(book, '/body/DocFragment[1]/body/p[2]/text().7')).toEqual({ cfi: 'epubcfi(/6/2!/4/4/1:7)', exact: true });
-    expect(cfiToXPointer(book, 'epubcfi(/6/2!/4/4/1:7)')).toEqual({ xpath: '/body/DocFragment[1]/body/p[2]/text().7', spine: 0 });
-    expect(cfiToXPointer(book, 'epubcfi(/6/2!/4/4,/1:0,/1:6)')?.xpath).toBe('/body/DocFragment[1]/body/p[2]/text().0');
-  });
-
-  it('counts code points and falls back to the chapter', () => {
-    const cfi = xpointerToCfi(book, '/body/DocFragment[2]/body/p/text()[1].6')!.cfi;
-    expect(cfi).toBe('epubcfi(/6/4!/4/4/1:7)');
-    expect(cfiToXPointer(book, cfi)?.xpath).toBe('/body/DocFragment[2]/body/p/text()[1].6');
-    expect(xpointerToCfi(book, '/body/DocFragment[1]/body/div[9]')).toEqual({ cfi: 'epubcfi(/6/2)', exact: false });
-    expect(xpointerToCfi(book, '/body/DocFragment[9]/body')).toBeNull();
-  });
-});
-
 describe('bookmark sync', () => {
   it('rejects bad credentials and answers the probe', async () => {
     expect((await call('GET', `/api/v1/bookmarks/${HASH}?cursor=0&limit=1`, undefined, { 'x-auth-user': 'x', 'x-auth-key': 'y' })).status).toBe(401);
@@ -176,19 +139,21 @@ describe('bookmark sync', () => {
     const b = mark('/body/DocFragment[1]/body/div[3]', { name: 'Lost spot' });
     const push = await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [a, b] });
     expect(push).toEqual({ status: 200, body: { accepted: 2 } });
-    expect(fake.bookmarks).toEqual([
-      { id: 500, bookId: 1, cfi: 'epubcfi(/6/2!/4/4/1:7)', title: 'Hello brave new world.', bookFileId: 11 },
-      { id: 501, bookId: 1, cfi: 'epubcfi(/6/2)', title: 'Lost spot', bookFileId: 11 },
-    ]);
+    expect(fake.exchange.liveBookmarks()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ pos: a.xpath, title: 'Hello brave new world.', key: expect.any(String) }),
+      expect.objectContaining({ pos: b.xpath, title: 'Lost spot' }),
+    ]));
+    expect(fake.exchange.liveBookmarks()).toHaveLength(2);
+    const first = fake.exchange.liveBookmarks().find((x) => x.pos === a.xpath)!;
 
     await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [a] });
-    expect(fake.bookmarks).toHaveLength(2);
+    expect(fake.exchange.liveBookmarks()).toHaveLength(2);
 
     await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [{ ...a, name: 'Renamed' }] });
-    expect(fake.bookmarks[0].title).toBe('Renamed');
+    expect(first.title).toBe('Renamed');
 
     await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [{ id: b.id, deleted: 1 }] });
-    expect(fake.bookmarks.map((x) => x.id)).toEqual([500]);
+    expect(fake.exchange.liveBookmarks().map((x) => x.id)).toEqual([first.id]);
 
     const items = latest(await pullAll());
     expect(items.get(a.id)).toEqual({ ...a, name: 'Renamed' });
@@ -202,22 +167,26 @@ describe('bookmark sync', () => {
 
   it('mirrors BookOrbit renames, deletions and new bookmarks with device ids', async () => {
     const a = bookmarkIdFor('/body/DocFragment[1]/body/p[2]/text().7');
-    fake.bookmarks[0].title = 'From web';
-    fake.bookmarks.push({ id: 900, bookId: 1, cfi: 'epubcfi(/6/4!/4/4/1:7)', title: 'Web mark' });
-    fake.bookmarks.push({ id: 901, bookId: 1, cfi: 'garbage', title: 'Broken' });
+    const [first] = fake.exchange.liveBookmarks();
+    first.title = 'From web';
+    first.dirty = true;
+    fake.exchange.addBookmark({ pos: '/body/DocFragment[2]/body/p/text()[1].6', title: 'Web mark' });
+    const broken = fake.exchange.addBookmark({ pos: 'garbage', title: 'Broken' });
     let items = latest(await pullAll());
     expect(items.get(a)).toMatchObject({ name: 'From web', deleted: 0 });
     const xpath = '/body/DocFragment[2]/body/p/text()[1].6';
     expect(items.get(bookmarkIdFor(xpath))).toMatchObject({ deleted: 0, xpath, si: 1, name: 'Web mark', percentage: 0.5 });
-    expect(items.get('bookorbit-901')).toEqual({ id: 'bookorbit-901', deleted: 1 });
+    expect([...items.keys()].some((id) => String(id).includes(String(broken.id)))).toBe(false);
+    expect(broken.key).toBeNull();
 
     // Device echoes the adopted bookmark back; nothing is duplicated upstream.
     await call('PUT', `/api/v1/bookmarks/${HASH}`, { items: [items.get(bookmarkIdFor(xpath))] });
-    expect(fake.bookmarks.filter((b) => b.title === 'Web mark')).toHaveLength(1);
+    expect(fake.exchange.liveBookmarks().filter((b) => b.title === 'Web mark')).toHaveLength(1);
 
-    fake.bookmarks = fake.bookmarks.filter((b) => b.id !== 500);
+    first.deleted = true;
     items = latest(await pullAll(5));
     expect(items.get(a)).toEqual({ id: a, deleted: 1 });
+    expect(first.key).toBeNull();
   });
 
   it('returns an empty page for unknown books', async () => {
@@ -228,12 +197,12 @@ describe('bookmark sync', () => {
   it('accepts bookmarks for an unmatched book and pushes them once it matches', async () => {
     const b = mark('/body/DocFragment[1]/body/p[1]/text().0', { name: 'Waiting' });
     expect(await call('PUT', `/api/v1/bookmarks/${LATE_SAME}`, { items: [b] })).toEqual({ status: 200, body: { accepted: 1 } });
-    expect(fake.bookmarks.some((x) => x.title === 'Waiting')).toBe(false);
+    expect(fake.exchange.liveBookmarks().some((x) => x.title === 'Waiting')).toBe(false);
     fake.lateKnown = true;
     try {
       const page = await call('GET', `/api/v1/bookmarks/${LATE_SAME}?cursor=0&limit=50`);
       expect(page.body.items.find((i: { id: string }) => i.id === b.id)).toMatchObject({ deleted: 0, name: 'Waiting' });
-      expect(fake.bookmarks.filter((x) => x.title === 'Waiting')).toHaveLength(1);
+      expect(fake.exchange.liveBookmarks().filter((x) => x.title === 'Waiting')).toHaveLength(1);
       expect(await db.selectFrom('pending_items').selectAll().execute()).toEqual([]);
     } finally {
       fake.lateKnown = false;

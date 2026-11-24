@@ -1,25 +1,12 @@
+import {
+  type AckDeleted, type AnnotationAckApplied, type AnnotationExchangeResult, type BookmarkAckApplied, type BookmarkExchangeResult, DEVICE_MODEL,
+  exchangeDeviceId, type ExchangeKey, type ExchangeOutcome, type KoAnnotation, type KoBookmark, koDatetime, PLUGIN_VERSION,
+} from './exchange.js';
 import { operationOf, upstreamDuration, upstreamRequests } from './metrics.js';
 
 export interface DeviceAuth {
   user: string;
   key: string;
-}
-
-export interface Annotation {
-  id: number;
-  bookId: number;
-  cfi: string | null;
-  text: string;
-  chapterTitle: string | null;
-  createdAt: string;
-  highlightedAt?: string;
-}
-
-export interface Bookmark {
-  id: number;
-  bookId: number;
-  cfi: string | null;
-  title: string;
 }
 
 export interface BookMeta {
@@ -162,42 +149,36 @@ export class BookOrbit {
     return timedFetch(`${this.baseUrl}/api/v1/books/${bookId}/thumbnail`, { headers: { 'x-api-key': this.apiKey } }, this.timeouts.request);
   }
 
-  async listAnnotations(bookId: number, bookFileId: number): Promise<Annotation[]> {
-    const res = await this.api(`/books/${bookId}/annotations?readerFileId=${bookFileId}`);
-    if (res.status === 404) return [];
-    const body = (await res.json()) as Annotation[] | { items: Annotation[] };
-    return Array.isArray(body) ? body : body.items;
+  /** POSTs to a KOReader plugin route with the device credentials, as KoreaderAuthGuard expects. */
+  private async plugin<T>(path: string, auth: DeviceAuth, body: Record<string, unknown>): Promise<T> {
+    const res = await this.device(`/plugin/${path}`, auth, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: exchangeDeviceId(auth.user), deviceModel: DEVICE_MODEL, pluginVersion: PLUGIN_VERSION, deviceTime: koDatetime(Math.floor(Date.now() / 1000)), ...body }),
+    });
+    if (res.status === 401) {
+      this.forgetDevice(auth);
+      throw new BookOrbitError(401, 'Unauthorized');
+    }
+    if (!res.ok) throw await failure(res, path);
+    return (await res.json()) as T;
   }
 
-  async createAnnotation(bookId: number, body: { cfi: string; text: string; chapterTitle: string | null; bookFileId: number }): Promise<Annotation> {
-    const res = await this.api(`/books/${bookId}/annotations`, { method: 'POST', body: JSON.stringify(body) });
-    if (res.status === 404) throw new BookOrbitError(404, 'Book not found');
-    return (await res.json()) as Annotation;
+  // crossorbit's database is a durable sidecar: a sparse key list is real deletions, not a lost copy.
+  exchangeAnnotations(auth: DeviceAuth, book: { hash: string; keys: ExchangeKey[]; keysComplete: boolean; changes: KoAnnotation[] }) {
+    return this.plugin<ExchangeOutcome<AnnotationExchangeResult>>('annotations/exchange', auth, { books: [{ ...book, sidecarState: 'known' }] });
   }
 
-  async deleteAnnotation(bookId: number, annotationId: number): Promise<void> {
-    await this.api(`/books/${bookId}/annotations/${annotationId}`, { method: 'DELETE' });
+  ackAnnotations(auth: DeviceAuth, book: { hash: string; applied: AnnotationAckApplied[]; deleted: AckDeleted[] }) {
+    return this.plugin<ExchangeOutcome<{ hash: string; acked: number }>>('annotations/exchange-ack', auth, { books: [book] });
   }
 
-  async listBookmarks(bookId: number, bookFileId: number): Promise<Bookmark[]> {
-    const res = await this.api(`/books/${bookId}/bookmarks?readerFileId=${bookFileId}`);
-    if (res.status === 404) return [];
-    const body = (await res.json()) as Bookmark[] | { items: Bookmark[] };
-    return Array.isArray(body) ? body : body.items;
+  exchangeBookmarks(auth: DeviceAuth, book: { hash: string; keys: ExchangeKey[]; keysComplete: boolean; changes: KoBookmark[] }) {
+    return this.plugin<ExchangeOutcome<BookmarkExchangeResult>>('bookmarks/exchange', auth, { books: [{ ...book, sidecarState: 'known' }] });
   }
 
-  async createBookmark(bookId: number, body: { bookFileId: number; cfi: string; title: string }): Promise<Bookmark> {
-    const res = await this.api(`/books/${bookId}/bookmarks`, { method: 'POST', body: JSON.stringify(body) });
-    if (res.status === 404) throw new BookOrbitError(404, 'Book not found');
-    return (await res.json()) as Bookmark;
-  }
-
-  async updateBookmark(bookId: number, bookmarkId: number, body: { title: string }): Promise<void> {
-    await this.api(`/books/${bookId}/bookmarks/${bookmarkId}`, { method: 'PATCH', body: JSON.stringify(body) });
-  }
-
-  async deleteBookmark(bookId: number, bookmarkId: number): Promise<void> {
-    await this.api(`/books/${bookId}/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+  ackBookmarks(auth: DeviceAuth, book: { hash: string; applied: BookmarkAckApplied[]; deleted: AckDeleted[] }) {
+    return this.plugin<ExchangeOutcome<{ hash: string; acked: number }>>('bookmarks/exchange-ack', auth, { books: [book] });
   }
 
   /** Uploads a reading session. BookOrbit dedupes on sessionId so retries are safe. */
